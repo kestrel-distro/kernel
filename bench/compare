@@ -1,0 +1,35 @@
+#!/bin/bash
+
+# Compare two `bench/run` result directories and print a delta table.
+# Lower is better for latency metrics; higher is better for RPS and bogo ops.
+#
+# Usage: bench/compare results/A results/B
+
+set -euo pipefail
+
+[[ $# -eq 2 ]] || {
+  echo "Usage: bench/compare <dirA> <dirB>" >&2
+  exit 1
+}
+
+a="${1%/}"
+b="${2%/}"
+
+value() { grep -E "^$2=" "$1/summary.txt" 2>/dev/null | head -1 | cut -d= -f2- || true; }
+
+printf '%-26s %16s %16s %10s\n' "metric" "$(basename "$a")" "$(basename "$b")" "delta%"
+printf '%-26s %16s %16s %10s\n' "------" "------" "------" "------"
+
+for key in \
+  schbench_wakeup_p50_us schbench_wakeup_p90_us schbench_wakeup_p99_us \
+  schbench_rps cyclictest_max_us cyclictest_avg_us stress_cpu_bogo_ops; do
+  va="$(value "$a" "$key")"
+  vb="$(value "$b" "$key")"
+  [[ -z $va || -z $vb ]] && continue
+  [[ $va == missing || $vb == missing ]] && continue
+  delta="$(awk -v x="$va" -v y="$vb" 'BEGIN { if (x == 0) print "n/a"; else printf "%+.1f", (y - x) / x * 100 }')"
+  printf '%-26s %16s %16s %10s\n' "$key" "$va" "$vb" "$delta"
+done
+
+echo
+echo "Latency metrics: lower is better. RPS and bogo ops: higher is better."

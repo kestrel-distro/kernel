@@ -28,6 +28,20 @@ only, never the default, until it wins on repeatable benchmarks.
 - English in commits, code and documentation.
 - History is never rewritten.
 
+## Building
+
+Build with `makepkg` from `packaging/`; see `packaging/README.md`. The ISO
+builder consumes this repository as a source package through
+`install/kestrel-source.packages` in the `kestrel` repository. The baseline
+(`packaging/local`) is `linux-kestrel`; `packaging/bore` and `packaging/autofdo`
+cover the other variants.
+
+## Measuring
+
+`bench/README.md`: run `bench/run` once per kernel, then `bench/compare`. CPU
+and scheduler only, so it is meaningful in the VM.
+
 ## Status
 
-Empty. The packaging, config and patch set are being assembled.
+Early. The baseline recipe is adapted; the first build and the VM A/B run are
+pending.

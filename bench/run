@@ -1,0 +1,92 @@
+#!/bin/bash
+
+# Kestrel kernel A/B harness. Run it once per kernel (boot stock `linux`, then
+# `linux-kestrel`), then compare the result directories. CPU and scheduler
+# focused, so it is meaningful in the VM; GPU and frame-time need bare metal and
+# are out of scope here.
+#
+# Usage: bench/run [label]
+# Results: bench/results/<timestamp>-<label>/
+
+set -euo pipefail
+
+label="${1:-$(uname -r)}"
+here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+out="$here/results/$(date +%Y%m%d-%H%M%S)-${label//\//_}"
+mkdir -p "$out"
+dur="${KESTREL_BENCH_SECONDS:-60}"
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+summary="$out/summary.txt"
+: >"$summary"
+
+# System identity, so a result directory is self-describing.
+{
+  echo "kernel=$(uname -r)"
+  echo "label=$label"
+  echo "cpu=$(awk -F: '/model name/{sub(/^ /, "", $2); print $2; exit}' /proc/cpuinfo)"
+  echo "nproc=$(nproc)"
+  echo "governor=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo unknown)"
+  echo "scx_state=$(cat /sys/kernel/sched_ext/state 2>/dev/null || echo none)"
+  echo "scx=$(scxctl get 2>/dev/null | tr '\n' ' ' || echo none)"
+  echo "cmdline=$(</proc/cmdline)"
+} | tee "$summary" | sed 's/^/  /'
+
+# Wakeup latency and throughput under scheduling pressure.
+if have schbench; then
+  echo "schbench ${dur}s..."
+  schbench -F 256 -n 5 -r "$dur" >"$out/schbench.txt" 2>&1 || true
+  awk '
+    /Wakeup Latencies/  { w = 1 }
+    /Request Latencies/ { w = 0 }
+    w && /50.0th:/ { p50 = $2 }
+    w && /90.0th:/ { p90 = $2 }
+    w && /99.0th:/ { p99 = $2 }
+    /^RPS:/ { rps = $2 }
+    END {
+      printf "schbench_wakeup_p50_us=%s\n", p50
+      printf "schbench_wakeup_p90_us=%s\n", p90
+      printf "schbench_wakeup_p99_us=%s\n", p99
+      printf "schbench_rps=%s\n", rps
+    }' "$out/schbench.txt" >>"$summary"
+else
+  echo "schbench_wakeup_p50_us=missing" >>"$summary"
+fi
+
+# Worst-case timer latency under load.
+if have cyclictest; then
+  echo "cyclictest 30s..."
+  cyclictest --mlockall --smp --priority 99 --interval 200 --distance 0 \
+    --loops 150000 >"$out/cyclictest.txt" 2>&1 || true
+  awk '
+    /^T:/ {
+      for (i = 1; i <= NF; i++) {
+        if ($i == "Max:") m = $(i + 1)
+        if ($i == "Avg:") a = $(i + 1)
+      }
+      if (m + 0 > mx) mx = m + 0
+      if (a + 0 > av) av = a + 0
+    }
+    END {
+      printf "cyclictest_max_us=%s\n", mx
+      printf "cyclictest_avg_us=%s\n", av
+    }' "$out/cyclictest.txt" >>"$summary"
+else
+  echo "cyclictest_max_us=missing" >>"$summary"
+fi
+
+# CPU throughput.
+if have stress-ng; then
+  echo "stress-ng 30s..."
+  stress-ng --cpu 0 --cpu-method all --timeout 30s --metrics-brief \
+    >"$out/stress-ng.txt" 2>&1 || true
+  ops=$(awk '/bogo ops\/s/ { line = $0 } END { if (line != "") { n = split(line, a, " "); print a[n] } }' "$out/stress-ng.txt")
+  echo "stress_cpu_bogo_ops=${ops:-missing}" >>"$summary"
+else
+  echo "stress_cpu_bogo_ops=missing" >>"$summary"
+fi
+
+echo
+echo "wrote $out"
+echo "compare with: bench/compare <dirA> <dirB>"
