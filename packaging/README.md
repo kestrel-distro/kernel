@@ -41,12 +41,10 @@ keys; the b2sum pin is the integrity check.
 
 ## Variants
 
-Each variant is a separate directory with its own `PKGBUILD` (and matching
-`b2sums`, using `SKIP` for variant-only patches):
-
-- `local`: `linux-kestrel` (baseline).
-- `bore`: `_cpusched=bore`, `_kestrel_variant=kestrel-bore`.
-- `autofdo`: baseline plus a profile pass (`_autofdo=yes`, `_autofdo_profile_name`).
+- `local`: `linux-kestrel` (baseline). Built by the Kestrel ISO.
+- `bore`: `linux-kestrel-bore`, its own `PKGBUILD` with `_cpusched=bore`.
+- `autofdo`: documented two-pass build, see `autofdo/README.md`. Not built by
+  the ISO.
 
 The `kestrel` ISO builds `local` only; the other variants are built by hand for
 A/B measurement.
