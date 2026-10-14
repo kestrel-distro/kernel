@@ -137,6 +137,13 @@
 # before it can become a default.
 : "${_trim_ksyms:=no}"
 
+# Aggressive footprint trim: disable legacy and desktop-unused subsystems
+# (legacy DRM, hamradio, joystick, DVB, obscure filesystems) so the kernel and
+# its module tree are smaller. Off by default: it removes hardware/resource
+# support and must be A/B-measured with the kernel `bench/` harness, and boot
+# tested on the supported hardware matrix, before it can ship.
+: "${_footprint:=no}"
+
 # Enable AUTOFDO_CLANG for the first compilation to create a kernel, which can be used for profiling
 # Workflow:
 # https://cachyos.org/blog/2411-kernel-autofdo/
@@ -529,6 +536,23 @@ prepare() {
     if [ "$_trim_ksyms" = "yes" ]; then
         echo "Enabling TRIM_UNUSED_KSYMS (validate out-of-tree modules)..."
         scripts/config -e TRIM_UNUSED_KSYMS
+    fi
+
+    # Opt-in footprint: disable legacy and desktop-unused subsystems. Keeps the
+    # storage, network, input, audio and filesystems the Kestrel desktop and its
+    # live ISO actually use (btrfs/ext4/xfs/f2fs/vfat/exfat/iso9660/squashfs/
+    # overlay/loop stay on).
+    if [ "$_footprint" = "yes" ]; then
+        echo "Applying footprint trim (legacy/desktop-unused subsystems)..."
+        scripts/config \
+            -d DRM_LEGACY \
+            -d HAMRADIO -d AX25 -d NETROM -d ROSE \
+            -d INPUT_JOYDEV -d INPUT_GAMEPORT -d GAMEPORT \
+            -d MEDIA_DIGITAL_TV_SUPPORT -d DVB_CORE \
+            -d JFS_FS -d REISERFS_FS -d GFS2_FS -d OCFS2_FS \
+            -d HFS_FS -d HFSPLUS_FS -d MINIX_FS -d SYSV_FS \
+            -d BEFS_FS -d NILFS2_FS -d QNX4FS_FS -d QNX6FS_FS \
+            -d UFS_FS -d AFFS_FS -d ROMFS_FS
     fi
 
     ### Rewrite configuration

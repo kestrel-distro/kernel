@@ -39,6 +39,7 @@ keys; the b2sum pin is the integrity check.
 | `_tickrate` | `idle` | no `NO_HZ_FULL` (desktop consistency) |
 | `_hugepage` | `always` | THP always |
 | `_trim_ksyms` | `no` | `TRIM_UNUSED_KSYMS`; opt-in, breaks out-of-tree modules |
+| `_footprint` | `no` | disable legacy/desktop-unused subsystems; A/B + boot-test before shipping |
 
 The Kestrel enforcement block keeps `sched_ext` (the shipped `scx_bpfland`
 default), so core `DEBUG_INFO_BTF` stays. Per-module BTF
