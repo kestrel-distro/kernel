@@ -2,10 +2,12 @@
 
 # Kestrel kernel A/B harness. Run it once per kernel (boot stock `linux`, then
 # `linux-kestrel`), then compare the result directories. CPU and scheduler
-# focused, so it is meaningful in the VM; GPU and frame-time need bare metal and
-# are out of scope here.
+# metrics are meaningful in the VM; footprint metrics are too; desktop metrics
+# (compositor/shell CPU and RSS, idle GPU, wakeups) need a live session and bare
+# metal.
 #
 # Usage: bench/run [label]
+# Modes: KESTREL_BENCH_MODE=cpu|footprint|desktop|all (default all)
 # Results: bench/results/<timestamp>-<label>/
 
 set -euo pipefail
@@ -15,7 +17,14 @@ here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 out="$here/results/$(date +%Y%m%d-%H%M%S)-${label//\//_}"
 mkdir -p "$out"
 dur="${KESTREL_BENCH_SECONDS:-60}"
+mode="${KESTREL_BENCH_MODE:-all}"
 
+case "$mode" in
+  cpu|footprint|desktop|all) ;;
+  *) echo "KESTREL_BENCH_MODE must be one of: cpu footprint desktop all" >&2; exit 2 ;;
+esac
+
+want() { [[ "$mode" == all || "$mode" == "$1" ]]; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
 summary="$out/summary.txt"
@@ -25,6 +34,7 @@ summary="$out/summary.txt"
 {
   echo "kernel=$(uname -r)"
   echo "label=$label"
+  echo "mode=$mode"
   echo "cpu=$(awk -F: '/model name/{sub(/^ /, "", $2); print $2; exit}' /proc/cpuinfo)"
   echo "nproc=$(nproc)"
   echo "governor=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo unknown)"
@@ -33,58 +43,192 @@ summary="$out/summary.txt"
   echo "cmdline=$(</proc/cmdline)"
 } | tee "$summary" | sed 's/^/  /'
 
-# Wakeup latency and throughput under scheduling pressure.
-if have schbench; then
-  echo "schbench ${dur}s..."
-  schbench -F 256 -n 5 -r "$dur" >"$out/schbench.txt" 2>&1 || true
-  awk '
-    /Wakeup Latencies/  { w = 1 }
-    /Request Latencies/ { w = 0 }
-    w && /50.0th:/ { p50 = $2 }
-    w && /90.0th:/ { p90 = $2 }
-    w && /99.0th:/ { p99 = $2 }
-    /^RPS:/ { rps = $2 }
-    END {
-      printf "schbench_wakeup_p50_us=%s\n", p50
-      printf "schbench_wakeup_p90_us=%s\n", p90
-      printf "schbench_wakeup_p99_us=%s\n", p99
-      printf "schbench_rps=%s\n", rps
-    }' "$out/schbench.txt" >>"$summary"
-else
-  echo "schbench_wakeup_p50_us=missing" >>"$summary"
-fi
+# --- CPU and scheduler -------------------------------------------------------
+if want cpu; then
 
-# Worst-case timer latency under load.
-if have cyclictest; then
-  echo "cyclictest 30s..."
-  cyclictest --mlockall --smp --priority 99 --interval 200 --distance 0 \
-    --loops 150000 >"$out/cyclictest.txt" 2>&1 || true
-  awk '
-    /^T:/ {
-      for (i = 1; i <= NF; i++) {
-        if ($i == "Max:") m = $(i + 1)
-        if ($i == "Avg:") a = $(i + 1)
+  # Wakeup latency and throughput under scheduling pressure.
+  if have schbench; then
+    echo "schbench ${dur}s..."
+    schbench -F 256 -n 5 -r "$dur" >"$out/schbench.txt" 2>&1 || true
+    awk '
+      /Wakeup Latencies/  { w = 1 }
+      /Request Latencies/ { w = 0 }
+      w && /50.0th:/ { p50 = $2 }
+      w && /90.0th:/ { p90 = $2 }
+      w && /99.0th:/ { p99 = $2 }
+      /^RPS:/ { rps = $2 }
+      END {
+        printf "schbench_wakeup_p50_us=%s\n", p50
+        printf "schbench_wakeup_p90_us=%s\n", p90
+        printf "schbench_wakeup_p99_us=%s\n", p99
+        printf "schbench_rps=%s\n", rps
+      }' "$out/schbench.txt" >>"$summary"
+  else
+    echo "schbench_wakeup_p50_us=missing" >>"$summary"
+  fi
+
+  # Worst-case timer latency under load.
+  if have cyclictest; then
+    echo "cyclictest 30s..."
+    cyclictest --mlockall --smp --priority 99 --interval 200 --distance 0 \
+      --loops 150000 >"$out/cyclictest.txt" 2>&1 || true
+    awk '
+      /^T:/ {
+        for (i = 1; i <= NF; i++) {
+          if ($i == "Max:") m = $(i + 1)
+          if ($i == "Avg:") a = $(i + 1)
+        }
+        if (m + 0 > mx) mx = m + 0
+        if (a + 0 > av) av = a + 0
       }
-      if (m + 0 > mx) mx = m + 0
-      if (a + 0 > av) av = a + 0
-    }
-    END {
-      printf "cyclictest_max_us=%s\n", mx
-      printf "cyclictest_avg_us=%s\n", av
-    }' "$out/cyclictest.txt" >>"$summary"
-else
-  echo "cyclictest_max_us=missing" >>"$summary"
+      END {
+        printf "cyclictest_max_us=%s\n", mx
+        printf "cyclictest_avg_us=%s\n", av
+      }' "$out/cyclictest.txt" >>"$summary"
+  else
+    echo "cyclictest_max_us=missing" >>"$summary"
+  fi
+
+  # CPU throughput.
+  if have stress-ng; then
+    echo "stress-ng 30s..."
+    stress-ng --cpu 0 --cpu-method all --timeout 30s --metrics-brief \
+      >"$out/stress-ng.txt" 2>&1 || true
+    ops=$(awk '/bogo ops\/s/ { line = $0 } END { if (line != "") { n = split(line, a, " "); print a[n] } }' "$out/stress-ng.txt")
+    echo "stress_cpu_bogo_ops=${ops:-missing}" >>"$summary"
+  else
+    echo "stress_cpu_bogo_ops=missing" >>"$summary"
+  fi
+
 fi
 
-# CPU throughput.
-if have stress-ng; then
-  echo "stress-ng 30s..."
-  stress-ng --cpu 0 --cpu-method all --timeout 30s --metrics-brief \
-    >"$out/stress-ng.txt" 2>&1 || true
-  ops=$(awk '/bogo ops\/s/ { line = $0 } END { if (line != "") { n = split(line, a, " "); print a[n] } }' "$out/stress-ng.txt")
-  echo "stress_cpu_bogo_ops=${ops:-missing}" >>"$summary"
-else
-  echo "stress_cpu_bogo_ops=missing" >>"$summary"
+# --- Footprint ---------------------------------------------------------------
+if want footprint; then
+  echo "footprint..."
+  kernver="$(uname -r)"
+  moddir="/usr/lib/modules/$kernver"
+  pkgbase="$(cat "$moddir/pkgbase" 2>/dev/null || echo unknown)"
+
+  # On-disk size of the running kernel: image + module tree. Lower is better.
+  # Arch installs the image under the module dir; UKI systems have no
+  # /boot/vmlinuz-*, so try the module dir first and fall back to /boot.
+  img="$moddir/vmlinuz"
+  [[ -f $img ]] || img="/boot/vmlinuz-$pkgbase"
+  if [[ -f $img ]]; then
+    echo "kernel_image_bytes=$(stat -c%s "$img")" >>"$summary"
+  else
+    echo "kernel_image_bytes=missing" >>"$summary"
+  fi
+  if [[ -d $moddir ]]; then
+    echo "modules_bytes=$(du -sb "$moddir" | cut -f1)" >>"$summary"
+    echo "modules_count=$(find "$moddir/kernel" -type f -name '*.ko*' 2>/dev/null | wc -l)" >>"$summary"
+  else
+    echo "modules_bytes=missing" >>"$summary"
+    echo "modules_count=missing" >>"$summary"
+  fi
+
+  echo "loaded_modules=$(ls /sys/module | wc -l)" >>"$summary"
+
+  # Kernel memory footprint, straight from /proc/meminfo. Lower is better.
+  mi() { awk -v k="$1:" '$1==k { r=$2 } END { print (r=="" ? "missing" : r) }' /proc/meminfo; }
+  echo "meminfo_slab_kb=$(mi Slab)" >>"$summary"
+  echo "meminfo_sreclaimable_kb=$(mi SReclaimable)" >>"$summary"
+  echo "meminfo_sunreclaim_kb=$(mi SUnreclaim)" >>"$summary"
+  echo "meminfo_kernel_stack_kb=$(mi KernelStack)" >>"$summary"
+  echo "meminfo_page_tables_kb=$(mi PageTables)" >>"$summary"
+  echo "meminfo_vmalloc_used_kb=$(mi VmallocUsed)" >>"$summary"
+
+  # Boot time breakdown. Lower is better. Each term carries its own unit, and
+  # the "=" total can be "Xmin Y.ZZZs", so sum the terms instead of parsing it.
+  if have systemd-analyze; then
+    systemd-analyze >"$out/systemd-analyze.txt" 2>&1 || true
+    read -r bfw bld bkn bus <<<"$(awk '
+      /Startup finished in/ {
+        for (i = 1; i <= NF; i++) {
+          if ($i == "(firmware)")  fw = $(i - 1)
+          if ($i == "(loader)")    ld = $(i - 1)
+          if ($i == "(kernel)")    kn = $(i - 1)
+          if ($i == "(userspace)") us = $(i - 1)
+        }
+      }
+      END { print fw, ld, kn, us }' "$out/systemd-analyze.txt")"
+    secs() {
+      case "$1" in
+        *ms)  awk -v v="${1%ms}"  'BEGIN { printf "%.3f", v / 1000 }' ;;
+        *min) awk -v v="${1%min}" 'BEGIN { printf "%.3f", v * 60 }' ;;
+        *s)   printf '%s' "${1%s}" ;;
+        *)    printf 'missing' ;;
+      esac
+    }
+    fwv="$(secs "${bfw:-}")"
+    ldv="$(secs "${bld:-}")"
+    knv="$(secs "${bkn:-}")"
+    usv="$(secs "${bus:-}")"
+    echo "boot_firmware_s=$fwv" >>"$summary"
+    echo "boot_loader_s=$ldv" >>"$summary"
+    echo "boot_kernel_s=$knv" >>"$summary"
+    echo "boot_userspace_s=$usv" >>"$summary"
+    echo "boot_total_s=$(awk -v a="$fwv" -v b="$ldv" -v c="$knv" -v d="$usv" '
+      BEGIN {
+        if (a == "missing" || b == "missing" || c == "missing" || d == "missing") print "missing"
+        else printf "%.3f", a + b + c + d
+      }')" >>"$summary"
+  else
+    echo "boot_total_s=missing" >>"$summary"
+  fi
+fi
+
+# --- Desktop -----------------------------------------------------------------
+if want desktop; then
+  if [[ -n "${HYPRLAND_INSTANCE_SIGNATURE:-}" ]] && have hyprctl; then
+    desktop_dur="${KESTREL_BENCH_DESKTOP_SECONDS:-10}"
+    echo "desktop sample ${desktop_dur}s..."
+
+    pid_of() { pgrep -x "$1" 2>/dev/null | head -1; }
+
+    cpu_pct() {
+      local pat="$1" pid hz t1 t2 u1 s1 u2 s2
+      pid="$(pid_of "$pat")"
+      [[ -n $pid ]] || { echo missing; return; }
+      hz="$(getconf CLK_TCK)"
+      t1="$(date +%s.%N)"
+      read -r u1 s1 <<<"$(awk '{ print $14, $15 }' "/proc/$pid/stat")"
+      sleep "$desktop_dur"
+      t2="$(date +%s.%N)"
+      read -r u2 s2 <<<"$(awk '{ print $14, $15 }' "/proc/$pid/stat")"
+      awk -v u1="$u1" -v s1="$s1" -v u2="$u2" -v s2="$s2" -v hz="$hz" -v t1="$t1" -v t2="$t2" \
+        'BEGIN { d = ((u2 + s2) - (u1 + s1)) / hz; e = t2 - t1; if (e <= 0) print "missing"; else printf "%.2f", 100 * d / e }'
+    }
+
+    rss_kb() {
+      local pid
+      pid="$(pid_of "$1")"
+      [[ -n $pid ]] || { echo missing; return; }
+      awk '/^VmRSS:/ { print $2 }' "/proc/$pid/status"
+    }
+
+    echo "desktop_hyprland_cpu_pct=$(cpu_pct Hyprland)" >>"$summary"
+    echo "desktop_quickshell_cpu_pct=$(cpu_pct quickshell)" >>"$summary"
+    echo "desktop_hyprland_rss_kb=$(rss_kb Hyprland)" >>"$summary"
+    echo "desktop_quickshell_rss_kb=$(rss_kb quickshell)" >>"$summary"
+
+    if have nvidia-smi; then
+      read -r nvmem nvpow nvutil <<<"$(nvidia-smi \
+        --query-gpu=memory.used,power.draw,utilization.gpu \
+        --format=csv,noheader,nounits 2>/dev/null | head -1 | tr ',' ' ')"
+      echo "desktop_nvidia_mem_mib=${nvmem:-missing}" >>"$summary"
+      echo "desktop_nvidia_power_w=${nvpow:-missing}" >>"$summary"
+      echo "desktop_nvidia_util_pct=${nvutil:-missing}" >>"$summary"
+    fi
+
+    if have powertop && [[ $EUID -eq 0 ]]; then
+      powertop --csv="$out/powertop.csv" --time="$desktop_dur" >/dev/null 2>&1 || true
+      wk="$(awk -F'","' 'tolower($0) ~ /wakeups-from-idle/ { print $2; exit }' "$out/powertop.csv" 2>/dev/null || true)"
+      echo "desktop_powertop_wakeups=${wk:-missing}" >>"$summary"
+    fi
+  else
+    echo "desktop=skipped (no Hyprland session; needs bare metal)" | tee -a "$summary" | sed 's/^/  /'
+  fi
 fi
 
 echo
