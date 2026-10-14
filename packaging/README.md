@@ -38,6 +38,12 @@ keys; the b2sum pin is the integrity check.
 | `_preempt` | `full` | full preemption |
 | `_tickrate` | `idle` | no `NO_HZ_FULL` (desktop consistency) |
 | `_hugepage` | `always` | THP always |
+| `_trim_ksyms` | `no` | `TRIM_UNUSED_KSYMS`; opt-in, breaks out-of-tree modules |
+
+The Kestrel enforcement block keeps `sched_ext` (the shipped `scx_bpfland`
+default), so core `DEBUG_INFO_BTF` stays. Per-module BTF
+(`DEBUG_INFO_BTF_MODULES`) is dropped: no shipped tool consumes it and it
+bloats every module.
 
 ## Variants
 

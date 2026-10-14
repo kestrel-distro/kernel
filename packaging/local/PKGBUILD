@@ -130,6 +130,12 @@
 # Build a debug package with non-stripped vmlinux
 : "${_build_debug:=no}"
 
+# Trim exported kernel symbols that no in-tree module references. Shrinks the
+# kernel but breaks out-of-tree modules built against it (nvidia-open-dkms in
+# Kestrel), so it is opt-in and must be validated with those modules loaded
+# before it can become a default.
+: "${_trim_ksyms:=no}"
+
 # Enable AUTOFDO_CLANG for the first compilation to create a kernel, which can be used for profiling
 # Workflow:
 # https://cachyos.org/blog/2411-kernel-autofdo/
@@ -498,12 +504,16 @@ prepare() {
 
     ### Kestrel config enforcement
     # Keep the options Kestrel depends on and drop the ones that cost desktop
-    # responsiveness for no gain. Ordered after the CachyOS defaults so it wins.
+    # responsiveness or footprint for no gain. Ordered after the CachyOS
+    # defaults so it wins. sched_ext stays (scx_bpfland is the shipped default
+    # scheduler), so core BTF stays; per-module BTF is dropped because no
+    # shipped tool consumes it and it bloats every module.
     echo "Applying Kestrel config overrides..."
     scripts/config \
         -e SCHED_CLASS_EXT \
         -e CGROUP_BPF \
         -e DEBUG_INFO_BTF \
+        -d DEBUG_INFO_BTF_MODULES \
         -e PSI \
         -e HIGH_RES_TIMERS \
         -e SYNC_FILE \
@@ -513,6 +523,12 @@ prepare() {
         -d SCHED_CORE \
         -d SCHEDSTATS \
         -d VIRT_CPU_ACCOUNTING_GEN
+
+    # Opt-in footprint: drop exported symbols no in-tree module uses.
+    if [ "$_trim_ksyms" = "yes" ]; then
+        echo "Enabling TRIM_UNUSED_KSYMS (validate out-of-tree modules)..."
+        scripts/config -e TRIM_UNUSED_KSYMS
+    fi
 
     ### Rewrite configuration
     echo "Rewrite configuration..."
