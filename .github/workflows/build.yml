@@ -1,0 +1,46 @@
+name: build
+
+# Builds the kernel variants in a clean Arch container so a packaging change is
+# proven to compile before it is consumed by the ISO. The benchmark harness
+# (bench/) runs on hardware or a QEMU boot and is not wired here.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'packaging/**'
+      - '.github/workflows/build.yml'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+      options: --privileged
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [local, bore]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare build environment
+        run: |
+          pacman -Sy --noconfirm --needed archlinux-keyring
+          pacman -Su --noconfirm --needed base-devel git sudo
+          useradd -m builder
+          printf 'builder ALL=(ALL) NOPASSWD: ALL\n' > /etc/sudoers.d/builder
+          chown -R builder:builder "$GITHUB_WORKSPACE"
+
+      - name: Build ${{ matrix.variant }}
+        working-directory: packaging/${{ matrix.variant }}
+        env:
+          CI: "true"
+        run: sudo -u builder makepkg -s -f --noconfirm --nocheck
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-kestrel-${{ matrix.variant }}
+          if-no-files-found: error
+          path: packaging/${{ matrix.variant }}/*.pkg.tar.zst
