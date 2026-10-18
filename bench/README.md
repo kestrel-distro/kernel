@@ -13,6 +13,22 @@ Each run writes `bench/results/<timestamp>-<label>/`: `summary.txt` (machine
 readable), `meta`-level identity, and the raw tool output. `bench/compare`
 prints the deltas.
 
+## sched_ext A/B (no rebuild)
+
+`bench/scx [label]` drives the shipped `scx-scheds` schedulers instead of the
+kernel: it switches `scx_loader` (via `scxctl`), settles, runs `bench/run`
+under a per-scheduler label, and restores the configured default (`scx_bpfland`)
+at the end. Default pairs are `scx_bpfland:` (loader default) and
+`scx_lavd:gaming`; override with `KESTREL_SCX_AB="scx_bpfland: scx_lavd:gaming
+scx_rusty:"`. `KESTREL_BENCH_MODE` and `KESTREL_BENCH_SECONDS` pass through, and
+`KESTREL_SCX_SETTLE` (default 5s) sets the settle window after each switch. It
+prints the `bench/compare` commands for the result directories it wrote.
+
+This exists so the scheduler choice is measured before any kernel-side
+scheduler work (a bespoke Rust sched_ext scheduler) is justified. It needs root
+(`sudo`) and a running `scx_loader.service`; the `bench/scx` file must be
+executable (`chmod +x bench/scx`) like `bench/run`.
+
 ## Modes
 
 `KESTREL_BENCH_MODE` selects the metric groups, default `all`:

@@ -1,0 +1,71 @@
+#!/bin/bash
+
+# A/B the shipped sched_ext schedulers without a kernel rebuild. For each
+# scheduler:mode pair it switches scx_loader, lets the system settle, then runs
+# the standard bench harness under a label, and restores the configured default
+# at the end. Compare the result directories it prints. Needs scx-tools
+# (scxctl) and a running scx_loader (scx_loader.service); switching is a root
+# action and goes through sudo.
+#
+# Usage: bench/scx [label]
+# Pairs: KESTREL_SCX_AB (default "scx_bpfland: scx_lavd:gaming"); an empty mode
+#        after the colon leaves the loader's per-scheduler default.
+# Mode:  KESTREL_BENCH_MODE is passed through to bench/run (default all).
+# Settle: KESTREL_SCX_SETTLE seconds after each switch (default 5).
+
+set -euo pipefail
+
+label="${1:-scx}"
+here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+
+command -v scxctl >/dev/null || {
+  echo "scxctl not found; install scx-tools" >&2
+  exit 1
+}
+
+as_root() {
+  if (( EUID == 0 )); then "$@"; else sudo "$@"; fi
+}
+
+read -r -a pairs <<<"${KESTREL_SCX_AB:-scx_bpfland: scx_lavd:gaming}"
+
+result_dir() {
+  ls -d "$here"/results/*-"$1" 2>/dev/null | tail -1
+}
+
+dirs=()
+for pair in "${pairs[@]}"; do
+  sched="${pair%%:*}"
+  mode="${pair#*:}"
+  l="$label-$sched"
+  [[ -n $mode ]] && l="$l-$mode"
+
+  echo "switching to $sched${mode:+ ($mode)}..."
+  args=(switch --sched "$sched")
+  [[ -n $mode ]] && args+=(--mode "$mode")
+  as_root scxctl "${args[@]}"
+
+  # Wait for the loader to report the new scheduler, then let the system settle
+  # so the first benchmark second is not the switchover transient.
+  for _ in $(seq 1 20); do
+    [[ "$(scxctl get 2>/dev/null | tr '\n' ' ')" == *"$sched"* ]] && break
+    sleep 0.5
+  done
+  sleep "${KESTREL_SCX_SETTLE:-5}"
+
+  KESTREL_BENCH_MODE="${KESTREL_BENCH_MODE:-all}" "$here/run" "$l"
+  dir="$(result_dir "$l")"
+  [[ -n $dir ]] || { echo "no result directory for $l" >&2; exit 1; }
+  dirs+=("$dir")
+done
+
+# Leave the machine as found: back to the scheduler scx_loader is configured to
+# start (scx_bpfland, see /etc/scx_loader/config.toml).
+echo "restoring the default scheduler..."
+as_root scxctl restore || true
+
+echo
+echo "compare with:"
+for ((i = 1; i < ${#dirs[@]}; i++)); do
+  echo "  bench/compare ${dirs[0]#"$here"/} ${dirs[i]#"$here"/}"
+done
