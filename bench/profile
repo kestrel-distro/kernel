@@ -1,0 +1,90 @@
+#!/bin/bash
+
+# Phase 0 hotspot profiler for the Kestrel desktop target.
+#
+# Samples the compositor, shell and audio stack with perf and writes a
+# symbol-ranked report, so the Rust-port work (plan Part C) targets measured
+# critical paths rather than guesses. Run on a bare-metal Kestrel session under
+# a representative load; the VM cannot profile the GPU.
+#
+# Usage: bench/profile [seconds]
+# Env:   KESTREL_PROFILE_SECONDS    sample window (default 15)
+#        KESTREL_PROFILE_CALLGRAPH  fp (default) or dwarf
+# Output: bench/results/<timestamp>-profile/{meta.txt,perf.data,perf.txt,hotspots.txt}
+
+set -euo pipefail
+
+secs="${1:-${KESTREL_PROFILE_SECONDS:-15}}"
+callgraph="${KESTREL_PROFILE_CALLGRAPH:-fp}"
+
+here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+out="$here/results/$(date +%Y%m%d-%H%M%S)-profile"
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+have perf || { echo "perf is required; install the 'perf' package" >&2; exit 2; }
+
+case "$callgraph" in
+  fp|dwarf) ;;
+  *) echo "KESTREL_PROFILE_CALLGRAPH must be fp or dwarf" >&2; exit 2 ;;
+esac
+
+# Permission gate: sampling other processes needs root or a relaxed paranoid.
+paranoid="$(cat /proc/sys/kernel/perf_event_paranoid 2>/dev/null || echo 2)"
+if [[ $EUID -ne 0 && $paranoid -gt 1 ]]; then
+  echo "need root, or 'sysctl kernel.perf_event_paranoid=1', to sample other PIDs" >&2
+  echo "current perf_event_paranoid=$paranoid, euid=$EUID" >&2
+  exit 3
+fi
+
+# The two targets plus the audio stack they share.
+targets=(Hyprland quickshell pipewire wireplumber)
+pids=()
+names=()
+for t in "${targets[@]}"; do
+  p="$(pgrep -x "$t" 2>/dev/null | head -1 || true)"
+  [[ -n $p ]] && { pids+=("$p"); names+=("$t:$p"); }
+done
+
+[[ ${#pids[@]} -gt 0 ]] || { echo "no target processes running (Hyprland, quickshell, pipewire, wireplumber)" >&2; exit 4; }
+
+pidlist="$(IFS=,; echo "${pids[*]}")"
+
+mkdir -p "$out"
+
+{
+  echo "mode=profile"
+  echo "kernel=$(uname -r)"
+  echo "seconds=$secs"
+  echo "callgraph=$callgraph"
+  echo "targets=${names[*]}"
+  echo "perf_event_paranoid=$paranoid"
+  echo "cmdline=$(</proc/cmdline)"
+} | tee "$out/meta.txt"
+
+echo "sampling $pidlist for ${secs}s (callgraph=$callgraph)..."
+
+# perf record wants a command to bound the run; sleep does it. `-g` implies the
+# chosen call graph. Sampling is opt-in and short, so it does not perturb much.
+perf record -o "$out/perf.data" -g --call-graph "$callgraph" -p "$pidlist" \
+  -- sleep "$secs" >"$out/perf-record.log" 2>&1 || true
+
+if [[ ! -s $out/perf.data ]]; then
+  echo "no samples captured; see $out/perf-record.log" >&2
+  exit 5
+fi
+
+# Full symbol report, then a compact top list for quick reading.
+perf report -i "$out/perf.data" --stdio --sort comm,dso,symbol \
+  --percent-limit 0.5 >"$out/perf.txt" 2>&1 || true
+
+perf report -i "$out/perf.data" --stdio -q --sort comm,dso,symbol \
+  --percent-limit 1.0 2>/dev/null \
+  | grep -vE '^\s*#' \
+  | awk 'NF' >"$out/hotspots.txt" || true
+
+echo
+echo "top self-cost symbols:"
+awk 'NR<=25' "$out/hotspots.txt" | sed 's/^/  /'
+echo
+echo "wrote $out (perf.txt full, hotspots.txt top, perf.data raw)"

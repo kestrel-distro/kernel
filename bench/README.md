@@ -35,6 +35,17 @@ metal. Frame-time at the renderer level needs a GPU-level tool and is not
 measured here; `desktop` reports resource cost instead, which is what the
 minimization effort is judged on.
 
+## Profiling (Phase 0)
+
+`bench/profile [seconds]` samples Hyprland, Quickshell, PipeWire and
+WirePlumber with `perf` and writes `bench/results/<timestamp>-profile/`:
+`meta.txt` (identity and target PIDs), `perf.data` (raw), `perf.txt` (full
+symbol report) and `hotspots.txt` (top self-cost symbols). It is the hotspot
+capture for the Rust-port work and needs bare metal plus root (or
+`kernel.perf_event_paranoid=1`). This is not an A/B metric; `compare` ignores
+it. Run it under a representative load (audio playing, menus opening, windows
+switching), not on an idle desktop.
+
 ## Metrics
 
 | Key | Group | Tool | Better |
@@ -60,9 +71,11 @@ Missing tools are recorded as `missing` and skipped by `compare`.
 - `cyclictest`: package `rt-tests`.
 - `schbench`: build from https://github.com/masoncl/schbench (`make`).
 - `powertop`: package `powertop`; desktop wakeups need root.
+- `perf`: package `perf`; `bench/profile` needs root or `perf_event_paranoid=1`.
 
 `KESTREL_BENCH_SECONDS` overrides the schbench runtime (default 60).
 `KESTREL_BENCH_DESKTOP_SECONDS` overrides the desktop sample window (default 10).
+`KESTREL_PROFILE_SECONDS` overrides the profile window (default 15).
 
 ## Notes
 
