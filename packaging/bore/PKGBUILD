@@ -556,9 +556,13 @@ prepare() {
     fi
 
     ### Rewrite configuration
-    echo "Rewrite configuration..."
+    # olddefconfig takes the Kconfig default for any symbol the configured
+    # `config` does not carry, without prompting, so a build never stops for
+    # input. It runs before `make prepare`: prepare's syncconfig is what would
+    # otherwise prompt for the new symbols.
+    echo "Resolving configuration (non-interactive)..."
+    make "${BUILD_FLAGS[@]}" olddefconfig
     make "${BUILD_FLAGS[@]}" prepare
-    yes "" | make "${BUILD_FLAGS[@]}" config >/dev/null
     diff -u ../config .config || :
 
     ### Prepared version

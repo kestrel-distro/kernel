@@ -143,6 +143,13 @@
 # tested on the supported hardware matrix, before it can ship.
 : "${_footprint:=no}"
 
+# Bring-up logging: maximum kernel verbosity, a larger printk ring buffer so
+# nothing is dropped before journald reads it, and pstore console/pmsg plus the
+# EFI variable backend so a panic survives to /sys/fs/pstore. It costs a little
+# memory and spams the console, so turn it off for the clean A/B kernel with
+# `_debug_logging=no`.
+: "${_debug_logging:=yes}"
+
 # Enable AUTOFDO_CLANG for the first compilation to create a kernel, which can be used for profiling
 # Workflow:
 # https://cachyos.org/blog/2411-kernel-autofdo/
@@ -531,6 +538,20 @@ prepare() {
         -d SCHEDSTATS \
         -d VIRT_CPU_ACCOUNTING_GEN
 
+    # Bring-up logging (see `_debug_logging`): keep the console at debug level,
+    # grow the ring buffer, and turn on the pstore console/pmsg sinks plus the
+    # EFI variable backend so early boot and a panic are captured (read them at
+    # /sys/fs/pstore after a reboot).
+    if [ "$_debug_logging" = "yes" ]; then
+        echo "Enabling bring-up logging config..."
+        scripts/config \
+            --set-val CONSOLE_LOGLEVEL_DEFAULT 7 \
+            --set-val LOG_BUF_SHIFT 21 \
+            -e PSTORE_CONSOLE \
+            -e PSTORE_PMSG \
+            -d EFI_VARS_PSTORE_DEFAULT_DISABLE
+    fi
+
     # Opt-in footprint: drop exported symbols no in-tree module uses.
     if [ "$_trim_ksyms" = "yes" ]; then
         echo "Enabling TRIM_UNUSED_KSYMS (validate out-of-tree modules)..."
@@ -555,9 +576,13 @@ prepare() {
     fi
 
     ### Rewrite configuration
-    echo "Rewrite configuration..."
+    # olddefconfig takes the Kconfig default for any symbol the configured
+    # `config` does not carry, without prompting, so a build never stops for
+    # input. It runs before `make prepare`: prepare's syncconfig is what would
+    # otherwise prompt for the new symbols.
+    echo "Resolving configuration (non-interactive)..."
+    make "${BUILD_FLAGS[@]}" olddefconfig
     make "${BUILD_FLAGS[@]}" prepare
-    yes "" | make "${BUILD_FLAGS[@]}" config >/dev/null
     diff -u ../config .config || :
 
     ### Prepared version
