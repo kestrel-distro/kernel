@@ -1,1 +1,11 @@
 bench/results/
+
+# makepkg build artifacts: extracted source, package staging, downloaded
+# sources, and the resolved config the recipe dumps for reuse
+src/
+pkg/
+*.tar.gz
+*.tar.xz
+*.pkg.tar.*
+config-*
+dkms-clang.patch
