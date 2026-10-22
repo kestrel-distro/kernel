@@ -1,0 +1,124 @@
+diff -ruN a/include/linux/sched/ext.h b/include/linux/sched/ext.h
+--- a/include/linux/sched/ext.h	2026-10-22 12:30:48.056087659 -0300
++++ b/include/linux/sched/ext.h	2026-10-22 12:30:33.838927303 -0300
+@@ -195,6 +195,12 @@
+ 	u32			dsq_flags;	/* protected by DSQ lock */
+ 	u32			flags;		/* protected by rq lock */
+ 	u32			weight;
++	/*
++	 * Kestrel per-task scheduling hint, set from sched_setattr(2) with
++	 * SCHED_FLAG_KESTREL_HINT. BPF schedulers read it with
++	 * scx_bpf_task_hint(); the value is otherwise opaque.
++	 */
++	u32			hint;
+ 	s32			sticky_cpu;
+ 	s32			holding_cpu;
+ 	s32			selected_cpu;
+diff -ruN a/include/uapi/linux/sched/types.h b/include/uapi/linux/sched/types.h
+--- a/include/uapi/linux/sched/types.h	2026-10-22 12:30:48.053870668 -0300
++++ b/include/uapi/linux/sched/types.h	2026-10-22 12:30:33.838800535 -0300
+@@ -116,6 +116,12 @@
+ 	__u32 sched_util_min;
+ 	__u32 sched_util_max;
+ 
++	/*
++	 * Kestrel: per-task scheduler hint (0..SCHED_KESTREL_HINT_MAX). Set
++	 * with SCHED_FLAG_KESTREL_HINT and read by sched_ext schedulers through
++	 * scx_bpf_task_hint(). Kernels without the extension leave it zero.
++	 */
++	__u32 sched_ext_hint;
+ };
+ 
+ #endif /* _UAPI_LINUX_SCHED_TYPES_H */
+diff -ruN a/include/uapi/linux/sched.h b/include/uapi/linux/sched.h
+--- a/include/uapi/linux/sched.h	2026-10-22 12:30:48.050896934 -0300
++++ b/include/uapi/linux/sched.h	2026-10-22 12:30:33.838886687 -0300
+@@ -144,6 +144,13 @@
+ #define SCHED_FLAG_UTIL_CLAMP_MIN	0x20
+ #define SCHED_FLAG_UTIL_CLAMP_MAX	0x40
+ 
++/*
++ * Kestrel: set the per-task scheduler hint in sched_attr::sched_ext_hint.
++ * A high bit keeps a distro-local flag clear of the upstream range.
++ */
++#define SCHED_FLAG_KESTREL_HINT		(1ULL << 40)
++#define SCHED_KESTREL_HINT_MAX		1024
++
+ #define SCHED_FLAG_KEEP_ALL	(SCHED_FLAG_KEEP_POLICY | \
+ 				 SCHED_FLAG_KEEP_PARAMS)
+ 
+@@ -154,7 +161,8 @@
+ 			 SCHED_FLAG_RECLAIM		| \
+ 			 SCHED_FLAG_DL_OVERRUN		| \
+ 			 SCHED_FLAG_KEEP_ALL		| \
+-			 SCHED_FLAG_UTIL_CLAMP)
++			 SCHED_FLAG_UTIL_CLAMP		| \
++			 SCHED_FLAG_KESTREL_HINT)
+ 
+ /* Only for sched_getattr() own flag param, if task is SCHED_DEADLINE */
+ #define SCHED_GETATTR_FLAG_DL_DYNAMIC	0x01
+diff -ruN a/kernel/sched/ext/ext.c b/kernel/sched/ext/ext.c
+--- a/kernel/sched/ext/ext.c	2026-10-22 12:30:48.061695451 -0300
++++ b/kernel/sched/ext/ext.c	2026-10-22 12:30:33.842029669 -0300
+@@ -9575,6 +9575,19 @@
+ 	return true;
+ }
+ 
++/**
++ * scx_bpf_task_hint - Read a task's Kestrel scheduling hint
++ * @p: task of interest
++ *
++ * Return @p's Kestrel hint, a value in [0, %SCHED_KESTREL_HINT_MAX] set by
++ * userspace through sched_setattr(2) with %SCHED_FLAG_KESTREL_HINT. Zero means
++ * "no hint", which is also what a kernel without the extension reports.
++ */
++__bpf_kfunc u32 scx_bpf_task_hint(struct task_struct *p)
++{
++	return READ_ONCE(p->scx.hint);
++}
++
+ static void scx_kick_cpu(struct scx_sched *sch, s32 cpu, u64 flags)
+ {
+ 	struct rq *this_rq;
+@@ -10681,6 +10694,7 @@
+ 
+ BTF_KFUNCS_START(scx_kfunc_ids_any)
+ BTF_ID_FLAGS(func, scx_bpf_task_set_slice, KF_IMPLICIT_ARGS | KF_RCU);
++BTF_ID_FLAGS(func, scx_bpf_task_hint, KF_IMPLICIT_ARGS | KF_RCU);
+ BTF_ID_FLAGS(func, scx_bpf_task_set_dsq_vtime, KF_IMPLICIT_ARGS | KF_RCU);
+ BTF_ID_FLAGS(func, scx_bpf_kick_cpu, KF_IMPLICIT_ARGS)
+ BTF_ID_FLAGS(func, scx_bpf_kick_cid, KF_IMPLICIT_ARGS)
+diff -ruN a/kernel/sched/syscalls.c b/kernel/sched/syscalls.c
+--- a/kernel/sched/syscalls.c	2026-10-22 12:30:48.059149190 -0300
++++ b/kernel/sched/syscalls.c	2026-10-22 12:30:33.839200737 -0300
+@@ -521,6 +521,10 @@
+ 	if (attr->sched_flags & ~(SCHED_FLAG_ALL | SCHED_FLAG_SUGOV))
+ 		return -EINVAL;
+ 
++	if ((attr->sched_flags & SCHED_FLAG_KESTREL_HINT) &&
++	    attr->sched_ext_hint > SCHED_KESTREL_HINT_MAX)
++		return -EINVAL;
++
+ 	/*
+ 	 * Valid priorities for SCHED_FIFO and SCHED_RR are
+ 	 * 1..MAX_RT_PRIO-1, valid priority for SCHED_NORMAL,
+@@ -688,12 +692,18 @@
+ 		}
+ 		__setscheduler_uclamp(p, attr);
+ 
++#ifdef CONFIG_SCHED_CLASS_EXT
++		if (attr->sched_flags & SCHED_FLAG_KESTREL_HINT)
++			WRITE_ONCE(p->scx.hint, attr->sched_ext_hint);
++#endif
++
+ 		if (scope->queued) {
+ 			/*
+ 			 * We enqueue to tail when the priority of a task is
+ 			 * increased (user space view).
+ 			 */
+-			if (oldprio < p->prio)
++			if (oldprio < p->prio ||
++			    (attr->sched_flags & SCHED_FLAG_KESTREL_HINT))
+ 				scope->flags |= ENQUEUE_HEAD;
+ 		}
+ 	}

@@ -327,6 +327,19 @@ prepare() {
         fi
     done
 
+    # Kestrel's own source changes live beside the recipe instead of in
+    # source=() (they need no checksum entry and no upstream fetch). The hint
+    # patch adds sched_attr::sched_ext_hint, SCHED_FLAG_KESTREL_HINT and the
+    # scx_bpf_task_hint() kfunc; see kestrel/README.md. git apply is used with
+    # an explicit --check and no fuzz so a rebase that moves the scheduler code
+    # fails the build loudly instead of silently patching the wrong place.
+    if [[ -f ${startdir}/kestrel/0001-kestrel-sched-hint.patch ]]; then
+        echo "Applying Kestrel hint patch..."
+        git apply --check -p1 "${startdir}/kestrel/0001-kestrel-sched-hint.patch" ||
+            _die "Kestrel hint patch does not apply cleanly"
+        git apply -p1 "${startdir}/kestrel/0001-kestrel-sched-hint.patch"
+    fi
+
     echo "Setting config..."
     cp ../config .config
 

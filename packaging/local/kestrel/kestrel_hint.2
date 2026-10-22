@@ -1,0 +1,78 @@
+.TH KESTREL_HINT 2 "2026-10-22" "Kestrel" "Linux Programmer's Manual"
+.SH NAME
+sched_ext_hint \- per-task scheduler hint (Kestrel)
+.SH SYNOPSIS
+.nf
+.B #include <linux/sched/types.h>
+.B #include <linux/sched.h>
+
+.B #define SCHED_FLAG_KESTREL_HINT (1ULL << 40)
+.B #define SCHED_KESTREL_HINT_MAX  1024
+.fi
+.SH DESCRIPTION
+.BR sched_setattr (2)
+and
+.BR sched_getattr (2)
+carry an extra
+.I __u32
+field,
+.IR sched_ext_hint ,
+after
+.IR sched_util_max .
+A task sets it by calling
+.BR sched_setattr (2)
+with
+.B SCHED_FLAG_KESTREL_HINT
+in
+.I sched_flags
+and the value in
+.IR sched_ext_hint ;
+the value is in the range
+.RB [ 0 ,
+.BR SCHED_KESTREL_HINT_MAX ].
+Values outside that range are rejected with
+.BR EINVAL .
+
+The hint is opaque to the scheduler core. A
+.BR sched_ext (7)
+scheduler reads it with the
+.B scx_bpf_task_hint ()
+kfunc and maps it to a scheduling policy; a value of zero means "no hint".
+The field is versioned by
+.IR sched_attr.size ,
+so callers that pass an older
+.I size
+are unaffected and read zero.
+
+Callers are expected to set
+.B SCHED_FLAG_KEEP_POLICY
+and
+.B SCHED_FLAG_KEEP_PARAMS
+alongside
+.B SCHED_FLAG_KESTREL_HINT
+so that setting a hint does not disturb the task's scheduling policy,
+priority or nice value.
+
+On a kernel without this extension,
+.BR sched_setattr (2)
+returns
+.B EINVAL
+for the unknown flag, and
+.BR sched_getattr (2)
+returns a
+.I size
+that does not cover the field.
+.SH RETURN VALUE
+These interfaces return zero on success; on error, \-1 is returned and
+.I errno
+is set. The error codes are those of
+.BR sched_setattr (2)
+and
+.BR sched_getattr (2);
+.B EINVAL
+also indicates that the running kernel has no Kestrel hint support.
+.SH CONFORMING TO
+Kestrel-specific, not in POSIX.
+.SH SEE ALSO
+.BR sched_setattr (2),
+.BR sched (7)
