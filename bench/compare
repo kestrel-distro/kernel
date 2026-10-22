@@ -31,7 +31,11 @@ for key in \
   desktop_hyprland_cpu_pct desktop_quickshell_cpu_pct \
   desktop_hyprland_rss_kb desktop_quickshell_rss_kb \
   desktop_nvidia_mem_mib desktop_nvidia_power_w desktop_nvidia_util_pct \
-  desktop_powertop_wakeups; do
+  desktop_powertop_wakeups \
+  session_desktop_cpu_pct session_desktop_wakeups_per_s session_desktop_rss_kb \
+  session_term_cpu_pct session_term_wakeups_per_s session_term_rss_kb \
+  session_browser_cpu_pct session_browser_wakeups_per_s session_browser_rss_kb \
+  session_powertop_wakeups; do
   va="$(value "$a" "$key")"
   vb="$(value "$b" "$key")"
   [[ -z $va || -z $vb ]] && continue

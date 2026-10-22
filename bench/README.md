@@ -38,10 +38,33 @@ executable (`chmod +x bench/scx`) like `bench/run`.
 | `cpu` | wakeup latency, timer latency, CPU throughput | VM or bare metal |
 | `footprint` | kernel/module bytes, kernel memory, boot time | VM or bare metal |
 | `desktop` | compositor + shell CPU and RSS, idle GPU, wakeups | bare metal, live session |
-| `all` | all of the above | desktop metrics self-skip without a session |
+| `session` | per-class CPU, wakeups and RSS under the four-app workload | VM or bare metal, live session |
+| `all` | all of the above | desktop/session metrics self-skip without a session |
 
 A mode not requested is not collected; `compare` skips keys absent from either
 side, so mixing modes across runs is safe but only shared metrics are shown.
+
+## Session mode (kernel bridge A/B)
+
+`KESTREL_BENCH_MODE=session bench/run <label>` drives a scripted four-app
+workload - terminal load in new Ghostty surfaces, Zen tabs, and Hyprland
+window/workspace churn - for `KESTREL_BENCH_SESSION_SECONDS` (default 30) and
+reports CPU%, wakeups/s and RSS for three classes:
+
+- `desktop` - Hyprland and Quickshell
+- `term` - Ghostty surfaces
+- `browser` - Zen and its content processes
+
+Class membership prefers the `kestrel.slice` cgroup hierarchy when it exists
+(`/sys/fs/cgroup/kestrel.slice/<class>`), and otherwise falls back to process
+name, so it works before the class hierarchy is deployed. Wakeups are a
+`voluntary_ctxt_switches` delta, a portable proxy rather than a perf counter.
+
+`KESTREL_SESSION_TERMS` (Ghostty surfaces), `KESTREL_SESSION_TABS` (Zen tabs)
+and `KESTREL_SESSION_NO_APPS=1` (measure churn only, spawn nothing) tune the
+workload. It needs a live Hyprland session; without one it records
+`session=skipped`. The spawned busy loops self-terminate; spawned browser tabs
+are left open and are not cleaned up.
 
 ## Scope
 
@@ -78,6 +101,10 @@ switching), not on an idle desktop.
 | `desktop_hyprland_rss_kb`, `desktop_quickshell_rss_kb` | desktop | /proc | lower |
 | `desktop_nvidia_mem_mib`, `desktop_nvidia_power_w`, `desktop_nvidia_util_pct` | desktop | nvidia-smi | lower |
 | `desktop_powertop_wakeups` | desktop | powertop (root) | lower |
+| `session_{desktop,term,browser}_cpu_pct` | session | /proc | lower |
+| `session_{desktop,term,browser}_wakeups_per_s` | session | /proc | lower |
+| `session_{desktop,term,browser}_rss_kb` | session | /proc | lower |
+| `session_powertop_wakeups` | session | powertop (root) | lower |
 
 Missing tools are recorded as `missing` and skipped by `compare`.
 

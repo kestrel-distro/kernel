@@ -20,8 +20,8 @@ dur="${KESTREL_BENCH_SECONDS:-60}"
 mode="${KESTREL_BENCH_MODE:-all}"
 
 case "$mode" in
-  cpu|footprint|desktop|all) ;;
-  *) echo "KESTREL_BENCH_MODE must be one of: cpu footprint desktop all" >&2; exit 2 ;;
+  cpu|footprint|desktop|session|all) ;;
+  *) echo "KESTREL_BENCH_MODE must be one of: cpu footprint desktop session all" >&2; exit 2 ;;
 esac
 
 want() { [[ "$mode" == all || "$mode" == "$1" ]]; }
@@ -228,6 +228,112 @@ if want desktop; then
     fi
   else
     echo "desktop=skipped (no Hyprland session; needs bare metal)" | tee -a "$summary" | sed 's/^/  /'
+  fi
+fi
+
+# --- Session (Kestrel bridge A/B) --------------------------------------------
+# Drives a scripted four-app workload (terminal load, browser tabs, compositor
+# window churn) and reports per-class CPU, wakeups and RSS. Class membership
+# prefers the kestrel.slice cgroup hierarchy (section 1 of the kernel-bridge
+# plan) and falls back to process-name matching so it runs before that exists.
+# VM-valid; it measures scheduler/wakeup/RSS, not GPU or frame time.
+if want session; then
+  if [[ -n "${HYPRLAND_INSTANCE_SIGNATURE:-}" ]] && have hyprctl; then
+    session_dur="${KESTREL_BENCH_SESSION_SECONDS:-30}"
+    echo "session workload ${session_dur}s..."
+    sess="$out/session"; mkdir -p "$sess"
+
+    class_root=/sys/fs/cgroup/kestrel.slice
+    class_pids() {
+      local class="$1"
+      if [[ -d $class_root/$class ]]; then
+        find "$class_root/$class" -name cgroup.procs -exec cat {} + 2>/dev/null | sort -un
+        return
+      fi
+      case "$class" in
+        desktop) { pgrep -x Hyprland; pgrep -x quickshell; } 2>/dev/null || true ;;
+        term)    pgrep -x ghostty 2>/dev/null || true ;;
+        browser) pgrep -f 'zen|Isolated Web Co|Web Content' 2>/dev/null || true ;;
+      esac
+    }
+
+    # cpu=total jiffies, vol=voluntary context switches (wakeup proxy), rss=KiB
+    snapshot() {
+      local class="$1" p cpu=0 vol=0 rss=0 c v r
+      while read -r p; do
+        [[ -r /proc/$p/stat ]] || continue
+        c="$(awk '{ print $14 + $15 }' "/proc/$p/stat" 2>/dev/null || echo 0)"
+        v="$(awk '/^voluntary_ctxt_switches:/{ print $2 }' "/proc/$p/status" 2>/dev/null || echo 0)"
+        r="$(awk '/^VmRSS:/{ print $2 }' "/proc/$p/status" 2>/dev/null || echo 0)"
+        cpu=$((cpu + ${c:-0})); vol=$((vol + ${v:-0})); rss=$((rss + ${r:-0}))
+      done < <(class_pids "$class")
+      printf '%s %s %s\n' "$cpu" "$vol" "$rss"
+    }
+
+    start_workloads() {
+      local secs="$1"
+      if [[ -z ${KESTREL_SESSION_NO_APPS:-} ]]; then
+        if have ghostty; then
+          local _i
+          for ((_i = 0; _i < ${KESTREL_SESSION_TERMS:-2}; _i++)); do
+            ghostty -e sh -c "timeout $((secs + 5)) sh -c 'while :; do :; done'" >/dev/null 2>&1 &
+          done
+        fi
+        if have zen; then
+          for ((_i = 0; _i < ${KESTREL_SESSION_TABS:-4}; _i++)); do
+            zen --new-tab about:blank >/dev/null 2>&1 &
+          done
+        fi
+      fi
+      (
+        end=$((SECONDS + secs))
+        while ((SECONDS < end)); do
+          hyprctl dispatch workspace e+1 >/dev/null 2>&1 || true; sleep 1
+          hyprctl dispatch workspace e-1 >/dev/null 2>&1 || true; sleep 1
+        done
+      ) &
+    }
+
+    classes=(desktop term browser)
+    declare -A c1 v1 r1
+    for c in "${classes[@]}"; do
+      read -r a b d < <(snapshot "$c")
+      c1[$c]="$a"; v1[$c]="$b"; r1[$c]="$d"
+      echo "$c cpu=$a vol=$b rss=$d" >>"$sess/before.txt"
+    done
+
+    t1="$(date +%s.%N)"
+    start_workloads "$session_dur"
+    sleep "$session_dur"
+    t2="$(date +%s.%N)"
+
+    hz="$(getconf CLK_TCK)"
+    elapsed="$(awk -v a="$t1" -v b="$t2" 'BEGIN { printf "%.3f", b - a }')"
+    for c in "${classes[@]}"; do
+      read -r a b d < <(snapshot "$c")
+      echo "$c cpu=$a vol=$b rss=$d" >>"$sess/after.txt"
+      cpu_pct="$(awk -v x="${c1[$c]}" -v y="$a" -v hz="$hz" -v e="$elapsed" \
+        'BEGIN { if (e <= 0) print "missing"; else printf "%.2f", 100 * ((y - x) / hz) / e }')"
+      wakeups="$(awk -v x="${v1[$c]}" -v y="$b" -v e="$elapsed" \
+        'BEGIN { if (e <= 0) print "missing"; else printf "%.2f", (y - x) / e }')"
+      echo "session_${c}_cpu_pct=$cpu_pct" >>"$summary"
+      echo "session_${c}_wakeups_per_s=$wakeups" >>"$summary"
+      echo "session_${c}_rss_kb=${d:-missing}" >>"$summary"
+    done
+
+    echo "session_terms=${KESTREL_SESSION_TERMS:-2}" >>"$summary"
+    echo "session_tabs=${KESTREL_SESSION_TABS:-4}" >>"$summary"
+    echo "session_seconds=$session_dur" >>"$summary"
+    awk '{ print "session_uptime_s=" $1 }' /proc/uptime >>"$summary"
+
+    # Best-effort system-wide wakeups while the workload runs.
+    if have powertop && [[ $EUID -eq 0 ]]; then
+      powertop --csv="$sess/powertop.csv" --time=5 >/dev/null 2>&1 || true
+      wk="$(awk -F'","' 'tolower($0) ~ /wakeups-from-idle/ { print $2; exit }' "$sess/powertop.csv" 2>/dev/null || true)"
+      echo "session_powertop_wakeups=${wk:-missing}" >>"$summary"
+    fi
+  else
+    echo "session=skipped (no Hyprland session; needs a live session)" | tee -a "$summary" | sed 's/^/  /'
   fi
 fi
 
