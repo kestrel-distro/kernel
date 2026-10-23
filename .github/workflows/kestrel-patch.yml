@@ -1,0 +1,67 @@
+name: kestrel-patch
+
+# The Kestrel hint patch is applied to the pinned CachyOS tarball by prepare().
+# This proves it still applies to that exact tarball without spending a kernel
+# build, so a CachyOS bump that moves the scheduler code fails here first.
+
+on:
+  push:
+    paths:
+      - 'packaging/local/kestrel/**'
+      - 'packaging/local/PKGBUILD'
+      - '.github/workflows/kestrel-patch.yml'
+  pull_request:
+    paths:
+      - 'packaging/local/kestrel/**'
+      - 'packaging/local/PKGBUILD'
+      - '.github/workflows/kestrel-patch.yml'
+  schedule:
+    - cron: '0 4 * * 1'
+  workflow_dispatch:
+
+env:
+  SRC_TARBALL: cachyos-7.2.10-1.tar.gz
+  SRC_URL: https://github.com/CachyOS/linux/releases/download/cachyos-7.2.10-1/cachyos-7.2.10-1.tar.gz
+  SRC_B2SUM: fa5000924722ffbabe58ffd474fbf6f70f2453295a596d976a0da2699b349d35c968b0d3c736c8cba407f6a6104233630ecd115385a9577187414989876abb50
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore the pinned tarball
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/${{ env.SRC_TARBALL }}
+          key: kestrel-src-${{ env.SRC_B2SUM }}
+
+      - name: Fetch the pinned tarball
+        run: |
+          set -euo pipefail
+          tarball="$RUNNER_TEMP/$SRC_TARBALL"
+          if [[ ! -f $tarball ]]; then
+            curl -fL --retry 5 --retry-delay 10 -o "$tarball" "$SRC_URL"
+          fi
+          echo "$SRC_B2SUM  $tarball" | b2sum -c -
+
+      - name: Apply the patch to the exact files prepare() patches
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/src"
+          # Only the five members the patch touches; extracting the full kernel
+          # would cost 265 MB of I/O for the same answer.
+          tar -xzf "$RUNNER_TEMP/$SRC_TARBALL" -C "$RUNNER_TEMP/src" --strip-components=1 \
+            cachyos-7.2.10-1/include/linux/sched/ext.h \
+            cachyos-7.2.10-1/include/uapi/linux/sched/types.h \
+            cachyos-7.2.10-1/include/uapi/linux/sched.h \
+            cachyos-7.2.10-1/kernel/sched/ext/ext.c \
+            cachyos-7.2.10-1/kernel/sched/syscalls.c
+          patch="$GITHUB_WORKSPACE/packaging/local/kestrel/0001-kestrel-sched-hint.patch"
+          cd "$RUNNER_TEMP/src"
+          git apply --check -p1 "$patch"
+          git apply -p1 "$patch"
+          grep -q 'scx_bpf_task_hint' kernel/sched/ext/ext.c
+          grep -q 'BTF_ID_FLAGS(func, scx_bpf_task_hint' kernel/sched/ext/ext.c
+          grep -q 'SCHED_FLAG_KESTREL_HINT' include/uapi/linux/sched.h
+          echo "Kestrel hint patch applies to $SRC_TARBALL"
