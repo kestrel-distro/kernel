@@ -33,17 +33,38 @@ for w in "${values[@]}"; do
         kill "$srv" 2>/dev/null || true; rm -rf "$tmp"; continue
     fi
 
+    # Peak PSS of the server while the terminals are alive. The server owns the
+    # terminal memory, so this is the number the worker count changes.
+    pss_file="$tmp/pss.peak"
+    echo 0 >"$pss_file"
+    (
+        while kill -0 "$srv" 2>/dev/null; do
+            v=$(awk '/^Pss:/{s+=$2} END{print s+0}' "/proc/$srv/smaps_rollup" 2>/dev/null || echo 0)
+            cur=$(<"$pss_file")
+            if (( v > cur )); then echo "$v" >"$pss_file"; fi
+            sleep 0.05
+        done
+    ) &
+    sampler=$!
+
     before=$(awk '{print $14+$15}' "/proc/$srv/stat" 2>/dev/null || echo 0)
     start=$(date +%s%N)
     files=()
+    clients=()
     for i in $(seq 1 "$terms"); do
         f="$tmp/$i.ms"; files+=("$f")
         footclient --server-socket="$sock" -e sh -c \
             "s=\$(date +%s%N); seq 1 50000; e=\$(date +%s%N); echo \$(( (e-s)/1000000 )) >'$f'" \
             >/dev/null 2>&1 &
+        clients+=("$!")
     done
-    wait
+    # Wait for the clients only. A bare `wait` also waits for the foot server,
+    # which never exits, and the whole matrix hangs on the first value.
+    for c in "${clients[@]}"; do wait "$c" 2>/dev/null || true; done
     end=$(date +%s%N)
+    kill "$sampler" 2>/dev/null || true
+    wait "$sampler" 2>/dev/null || true
+    pss_peak=$(<"$pss_file")
     after=$(awk '{print $14+$15}' "/proc/$srv/stat" 2>/dev/null || echo 0)
     kill "$srv" 2>/dev/null || true
     wait "$srv" 2>/dev/null || true
@@ -55,8 +76,8 @@ for w in "${values[@]}"; do
     done
     wall=$(( (end-start)/1000000 ))
     cpu=$(( (after-before) * 1000 / 100 )) # clock ticks -> ~centiseconds
-    printf 'workers=%-8s terminals_ok=%s wall_ms=%s max_ms=%s avg_ms=%s server_ticks=%s\n' \
-        "$w" "$n" "$wall" "$max" "$(( n ? total/n : 0 ))" "$((after-before))" | tee -a "$out/summary.txt"
+    printf 'workers=%-8s terminals_ok=%s wall_ms=%s max_ms=%s avg_ms=%s server_ticks=%s server_pss_peak_kb=%s\n' \
+        "$w" "$n" "$wall" "$max" "$(( n ? total/n : 0 ))" "$((after-before))" "$pss_peak" | tee -a "$out/summary.txt"
     cp "$tmp/server.log" "$out/server-$w.log" 2>/dev/null || true
     rm -rf "$tmp"
 done
