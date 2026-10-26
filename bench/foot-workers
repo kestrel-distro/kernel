@@ -1,0 +1,64 @@
+#!/bin/bash
+# DEV ONLY - compare foot's per-terminal rendering worker counts.
+# Starts a private foot server/socket so the session server is untouched.
+set -euo pipefail
+
+terms="${1:-${KESTREL_FOOT_TERMS:-8}}"
+values=("${@:2}")
+(( ${#values[@]} )) || values=(0 1 2 4 default)
+here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+out="$here/foot-workers-$(date +%Y%m%d-%H%M%S)"
+mkdir -p "$out"
+echo "terms=$terms workers=${values[*]}" | tee "$out/summary.txt"
+
+command -v foot >/dev/null || { echo "foot not installed" >&2; exit 1; }
+command -v footclient >/dev/null || { echo "footclient not installed" >&2; exit 1; }
+
+base_cfg="${XDG_CONFIG_HOME:-$HOME/.config}/foot/foot.ini"
+[[ -f $base_cfg ]] || base_cfg="${KESTREL_PATH:-/usr/share/kestrel}/config/foot/foot.ini"
+
+for w in "${values[@]}"; do
+    tmp=$(mktemp -d)
+    sock="$tmp/foot.sock"
+    cfg="$tmp/foot.ini"
+    cp "$base_cfg" "$cfg" 2>/dev/null || : >"$cfg"
+    sed -i '/^workers=/d' "$cfg"
+    [[ $w == default ]] || printf 'workers=%s\n' "$w" >>"$cfg"
+
+    foot --server="$sock" -c "$cfg" >"$tmp/server.log" 2>&1 &
+    srv=$!
+    for _ in $(seq 1 50); do [[ -S $sock ]] && break; sleep 0.1; done
+    if [[ ! -S $sock ]]; then
+        echo "$w: server failed" | tee -a "$out/summary.txt"
+        kill "$srv" 2>/dev/null || true; rm -rf "$tmp"; continue
+    fi
+
+    before=$(awk '{print $14+$15}' "/proc/$srv/stat" 2>/dev/null || echo 0)
+    start=$(date +%s%N)
+    files=()
+    for i in $(seq 1 "$terms"); do
+        f="$tmp/$i.ms"; files+=("$f")
+        footclient --server-socket="$sock" -e sh -c \
+            "s=\$(date +%s%N); seq 1 50000; e=\$(date +%s%N); echo \$(( (e-s)/1000000 )) >'$f'" \
+            >/dev/null 2>&1 &
+    done
+    wait
+    end=$(date +%s%N)
+    after=$(awk '{print $14+$15}' "/proc/$srv/stat" 2>/dev/null || echo 0)
+    kill "$srv" 2>/dev/null || true
+    wait "$srv" 2>/dev/null || true
+
+    max=0 total=0 n=0
+    for f in "${files[@]}"; do
+        [[ -s $f ]] || continue
+        ms=$(<"$f"); (( ms > max )) && max=$ms; total=$((total+ms)); n=$((n+1))
+    done
+    wall=$(( (end-start)/1000000 ))
+    cpu=$(( (after-before) * 1000 / 100 )) # clock ticks -> ~centiseconds
+    printf 'workers=%-8s terminals_ok=%s wall_ms=%s max_ms=%s avg_ms=%s server_ticks=%s\n' \
+        "$w" "$n" "$wall" "$max" "$(( n ? total/n : 0 ))" "$((after-before))" | tee -a "$out/summary.txt"
+    cp "$tmp/server.log" "$out/server-$w.log" 2>/dev/null || true
+    rm -rf "$tmp"
+done
+
+echo "results: $out"
