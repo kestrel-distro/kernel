@@ -47,12 +47,12 @@ side, so mixing modes across runs is safe but only shared metrics are shown.
 ## Session mode (kernel bridge A/B)
 
 `KESTREL_BENCH_MODE=session bench/run <label>` drives a scripted four-app
-workload - terminal load in new Ghostty surfaces, Zen tabs, and Hyprland
+workload - terminal load in new foot surfaces, Zen tabs, and Hyprland
 window/workspace churn - for `KESTREL_BENCH_SESSION_SECONDS` (default 30) and
 reports CPU%, wakeups/s and RSS for three classes:
 
 - `desktop` - Hyprland and Quickshell
-- `term` - Ghostty surfaces
+- `term` - foot surfaces
 - `browser` - Zen and its content processes
 
 Class membership prefers the `kestrel.slice` cgroup hierarchy when it exists
@@ -60,7 +60,7 @@ Class membership prefers the `kestrel.slice` cgroup hierarchy when it exists
 name, so it works before the class hierarchy is deployed. Wakeups are a
 `voluntary_ctxt_switches` delta, a portable proxy rather than a perf counter.
 
-`KESTREL_SESSION_TERMS` (Ghostty surfaces), `KESTREL_SESSION_TABS` (Zen tabs)
+`KESTREL_SESSION_TERMS` (foot surfaces), `KESTREL_SESSION_TABS` (Zen tabs)
 and `KESTREL_SESSION_NO_APPS=1` (measure churn only, spawn nothing) tune the
 workload. It needs a live Hyprland session; without one it records
 `session=skipped`. The spawned busy loops self-terminate; spawned browser tabs

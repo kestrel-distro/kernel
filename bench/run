@@ -252,7 +252,7 @@ if want session; then
       fi
       case "$class" in
         desktop) { pgrep -x Hyprland; pgrep -x quickshell; } 2>/dev/null || true ;;
-        term)    pgrep -x ghostty 2>/dev/null || true ;;
+        term)    { pgrep -x foot; pgrep -x footclient; } 2>/dev/null || true ;;
         browser) pgrep -f 'zen|Isolated Web Co|Web Content' 2>/dev/null || true ;;
       esac
     }
@@ -273,10 +273,15 @@ if want session; then
     start_workloads() {
       local secs="$1"
       if [[ -z ${KESTREL_SESSION_NO_APPS:-} ]]; then
-        if have ghostty; then
+        if have footclient && [[ -S ${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/foot.sock ]]; then
           local _i
           for ((_i = 0; _i < ${KESTREL_SESSION_TERMS:-2}; _i++)); do
-            ghostty -e sh -c "timeout $((secs + 5)) sh -c 'while :; do :; done'" >/dev/null 2>&1 &
+            footclient -e sh -c "timeout $((secs + 5)) sh -c 'while :; do :; done'" >/dev/null 2>&1 &
+          done
+        elif have foot; then
+          local _i
+          for ((_i = 0; _i < ${KESTREL_SESSION_TERMS:-2}; _i++)); do
+            foot -e sh -c "timeout $((secs + 5)) sh -c 'while :; do :; done'" >/dev/null 2>&1 &
           done
         fi
         if have zen; then
