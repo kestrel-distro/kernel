@@ -1,0 +1,132 @@
+#!/bin/bash
+
+# Full live-ISO benchmark run. Start it from a terminal in the Kestrel session,
+# as the logged-in user (not root), so systemctl --user and Hyprland work.
+#
+# It records idle desktop cost, the full scheduler/cgroups/hints matrix, VRAM,
+# peak PSS, process spawns, wakeups, foot workers and (optional) perf hotspots.
+# Missing tools are recorded, not fatal.
+#
+# Env: KESTREL_BENCH_REPS (default 5), KESTREL_BENCH_MODE (default all),
+#      KESTREL_BENCH_BG_CPUS (default 4), KESTREL_BENCH_SECONDS,
+#      KESTREL_BENCH_SESSION_SECONDS, KESTREL_FOOT_TERMS, KESTREL_BENCH_LIVE_OUT.
+
+set -euo pipefail
+
+here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+stamp="$(date +%Y%m%d-%H%M%S)"
+if [[ -d /mnt/kestrel-host-logs ]]; then
+  out="${KESTREL_BENCH_LIVE_OUT:-/mnt/kestrel-host-logs/live-$stamp}"
+else
+  out="${KESTREL_BENCH_LIVE_OUT:-$HOME/kestrel-bench-live/$stamp}"
+fi
+mkdir -p "$out"
+log="$out/live.log"
+exec > >(tee -a "$log") 2>&1
+
+say() { printf '\n== %s ==\n' "$*"; }
+have() { command -v "$1" >/dev/null 2>&1; }
+
+say "identity"
+whoami
+uname -r
+systemd-detect-virt || true
+sed -n 's/^NAME=//p; s/^VERSION_ID=//p' /etc/os-release 2>/dev/null || true
+echo "out: $out"
+
+if (( EUID == 0 )); then
+  echo "Run this as the logged-in session user, not root: systemctl --user and Hyprland need the user session." >&2
+  exit 1
+fi
+
+if [[ -z ${HYPRLAND_INSTANCE_SIGNATURE:-} ]]; then
+  echo "No Hyprland session in this environment; start a terminal inside the live session." >&2
+  exit 1
+fi
+
+for tool in stress-ng cyclictest schbench perf powertop pidstat; do
+  have "$tool" && continue
+  echo "missing tool: $tool (its metrics will be recorded as missing)"
+done
+
+work="$out/bench"
+cp -a "$here" "$work"
+cd "$work"
+
+sudo -n systemctl start scx_loader >/dev/null 2>&1 || true
+systemctl --user start kestrel-slices.service kestrel-broker.service >/dev/null 2>&1 || true
+if [[ ! -S ${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/foot.sock ]]; then
+  systemctl --user start foot-server.service >/dev/null 2>&1 ||
+    { pgrep -f '^foot --server' >/dev/null || (foot --server >/dev/null 2>&1 &); }
+fi
+
+peak_apps=(Hyprland quickshell foot footclient kestrel-broker zen chromium)
+: >"$out/mem-peak.raw"
+(
+  while :; do
+    for name in "${peak_apps[@]}"; do
+      for pid in $(pgrep -x "$name" 2>/dev/null || true); do
+        [[ -r /proc/$pid/smaps_rollup ]] || continue
+        pss=$(awk '/^Pss:/{s+=$2} END{print s+0}' "/proc/$pid/smaps_rollup" 2>/dev/null || echo 0)
+        printf '%s\t%s\n' "$name" "$pss"
+      done
+    done
+    sleep 5
+  done
+) >>"$out/mem-peak.raw" &
+mem_pid=$!
+
+cleanup() {
+  kill "$mem_pid" 2>/dev/null || true
+  wait "$mem_pid" 2>/dev/null || true
+}
+trap cleanup EXIT
+
+say "idle desktop"
+KESTREL_BENCH_MODE=desktop KESTREL_BENCH_OUT="$out/desktop" ./run desktop || true
+
+say "full matrix"
+KESTREL_MATRIX_REPS="${KESTREL_BENCH_REPS:-5}" \
+KESTREL_MATRIX_MODE="${KESTREL_BENCH_MODE:-all}" \
+KESTREL_MATRIX_BG_CPUS="${KESTREL_BENCH_BG_CPUS:-4}" \
+KESTREL_MATRIX_SESSION_SECONDS="${KESTREL_BENCH_SESSION_SECONDS:-30}" \
+KESTREL_SESSION_TABS="${KESTREL_SESSION_TABS:-0}" \
+  ./matrix live || true
+
+matrix_dir="$(ls -1d results/*-matrix-live 2>/dev/null | tail -1 || true)"
+if [[ -n $matrix_dir ]]; then
+  ./compare "$matrix_dir"/* >"$out/matrix-compare.txt" 2>&1 || true
+  printf 'matrix: %s\n' "$out/matrix-compare.txt"
+fi
+
+say "peak PSS"
+cleanup
+trap - EXIT
+{
+  echo "peak PSS during workload (kB, 5s samples)"
+  awk -F'\t' '{ if ($2 + 0 > m[$1]) m[$1] = $2 + 0 } END { for (c in m) printf "%9d\t%s\n", m[c], c }' \
+    "$out/mem-peak.raw" 2>/dev/null | sort -rn
+} | tee "$out/mem-peak.txt"
+rm -f "$out/mem-peak.raw"
+
+say "foot workers"
+./foot-workers "${KESTREL_FOOT_TERMS:-8}" >"$out/foot-workers.txt" 2>&1 || true
+cat "$out/foot-workers.txt" 2>/dev/null || true
+
+say "process spawns and wakeups"
+if have pidstat; then
+  qs="$(pgrep -x quickshell | head -1 || true)"
+  [[ -n $qs ]] && pidstat -t -w -p "$qs" 1 30 >"$out/pidstat-quickshell.txt" 2>&1 || true
+fi
+if have bpftrace; then
+  sudo -n timeout 30 bpftrace -e 'tracepoint:sched:sched_process_exec { @[comm] = count(); }' \
+    >"$out/spawns.txt" 2>&1 || true
+fi
+
+say "perf hotspots"
+if have perf; then
+  sudo -n ./profile 15 >"$out/profile.txt" 2>&1 || true
+fi
+
+say "done"
+echo "results: $out"

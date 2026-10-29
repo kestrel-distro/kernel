@@ -1,50 +1,111 @@
 #!/bin/bash
 
-# Compare two `bench/run` result directories and print a delta table.
-# Lower is better for latency and footprint metrics; higher is better for RPS
-# and bogo ops; desktop CPU/RSS/GPU/wakeups are lower-is-better.
+# Compare one or more `bench/run` result directories and print a delta table.
+# Runs sharing a `variant=` line are grouped (that is how `bench/matrix` repeats
+# are collapsed): each group is reported as median with [min..max]. The delta is
+# against the first group. Lower is better for latency and footprint metrics;
+# higher is better for RPS, bogo ops and throughput.
 #
-# Usage: bench/compare results/A results/B
+# Usage: bench/compare <dir> [<dir> ...]        # e.g. bench/compare results/matrix-*/*
 
 set -euo pipefail
 
-[[ $# -eq 2 ]] || {
-  echo "Usage: bench/compare <dirA> <dirB>" >&2
+(( $# )) || {
+  echo "Usage: bench/compare <dir> [<dir> ...]" >&2
   exit 1
 }
 
-a="${1%/}"
-b="${2%/}"
+tmp="$(mktemp)"
+trap 'rm -f "$tmp"' EXIT
 
-value() { grep -E "^$2=" "$1/summary.txt" 2>/dev/null | head -1 | cut -d= -f2- || true; }
+groups=()
+declare -A group_seen
+keys=()
+declare -A key_seen
 
-printf '%-26s %16s %16s %10s\n' "metric" "$(basename "$a")" "$(basename "$b")" "delta%"
-printf '%-26s %16s %16s %10s\n' "------" "------" "------" "------"
+for d in "$@"; do
+  d="${d%/}"
+  [[ -f $d/summary.txt ]] || { echo "compare: no summary.txt in $d" >&2; continue; }
+  v="$(grep -E '^variant=' "$d/summary.txt" | head -1 | cut -d= -f2- || true)"
+  [[ -z $v || $v == unlabelled ]] && v="$(basename "$d")"
+  if [[ -z ${group_seen[$v]:-} ]]; then group_seen[$v]=1; groups+=("$v"); fi
+  while IFS='=' read -r k val; do
+    [[ -n $k && -n $val ]] || continue
+    if [[ -z ${key_seen[$k]:-} ]]; then key_seen[$k]=1; keys+=("$k"); fi
+    printf '%s\t%s\t%s\n' "$v" "$k" "$val" >>"$tmp"
+  done < <(grep -E '^[A-Za-z0-9_.]+=' "$d/summary.txt")
+done
 
-for key in \
-  schbench_wakeup_p50_us schbench_wakeup_p90_us schbench_wakeup_p99_us \
-  schbench_rps cyclictest_max_us cyclictest_avg_us stress_cpu_bogo_ops \
-  kernel_image_bytes modules_bytes modules_count loaded_modules \
-  meminfo_slab_kb meminfo_sreclaimable_kb meminfo_sunreclaim_kb \
-  meminfo_kernel_stack_kb meminfo_page_tables_kb meminfo_vmalloc_used_kb \
-  boot_firmware_s boot_loader_s boot_kernel_s boot_userspace_s boot_total_s \
-  desktop_hyprland_cpu_pct desktop_quickshell_cpu_pct \
-  desktop_hyprland_rss_kb desktop_quickshell_rss_kb \
-  desktop_nvidia_mem_mib desktop_nvidia_power_w desktop_nvidia_util_pct \
-  desktop_powertop_wakeups \
-  session_desktop_cpu_pct session_desktop_wakeups_per_s session_desktop_rss_kb \
-  session_term_cpu_pct session_term_wakeups_per_s session_term_rss_kb \
-  session_browser_cpu_pct session_browser_wakeups_per_s session_browser_rss_kb \
-  session_powertop_wakeups; do
-  va="$(value "$a" "$key")"
-  vb="$(value "$b" "$key")"
-  [[ -z $va || -z $vb ]] && continue
-  [[ $va == missing || $vb == missing ]] && continue
-  delta="$(awk -v x="$va" -v y="$vb" 'BEGIN { if (x == 0) print "n/a"; else printf "%+.1f", (y - x) / x * 100 }')"
-  printf '%-26s %16s %16s %10s\n' "$key" "$va" "$vb" "$delta"
+(( ${#groups[@]} )) || { echo "compare: no usable result directories" >&2; exit 1; }
+
+numeric() { [[ $1 =~ ^-?[0-9]+([.][0-9]+)?([eE][-+]?[0-9]+)?$ ]]; }
+
+stat_of() {
+  local group="$1" key="$2" vals
+  mapfile -t vals < <(awk -F'\t' -v g="$group" -v k="$key" \
+    '$1==g && $2==k && $3!="missing" && $3!="-" { print $3 }' "$tmp")
+  (( ${#vals[@]} )) || { printf '%s\t%s\t%s\n' "-" "-" "-"; return; }
+  local allnum=1 x
+  for x in "${vals[@]}"; do numeric "$x" || { allnum=0; break; }; done
+  if (( ! allnum )); then
+    printf '%s\t%s\t%s\n' "${vals[0]}" "-" "-"
+    return
+  fi
+  printf '%s\n' "${vals[@]}" | sort -n | awk '
+    { a[NR] = $1 }
+    END {
+      if (NR % 2) m = a[(NR + 1) / 2];
+      else m = (a[NR / 2] + a[NR / 2 + 1]) / 2;
+      printf "%.6g\t%.6g\t%.6g\n", m, a[1], a[NR];
+    }'
+}
+
+echo "groups:"
+for ((i = 0; i < ${#groups[@]}; i++)); do
+  printf '  [%d] %s\n' "$((i + 1))" "${groups[i]}"
+done
+echo
+
+printf '%-34s' "metric"
+for ((i = 0; i < ${#groups[@]}; i++)); do printf ' %-18s' "[$((i + 1))]"; done
+printf '\n'
+printf '%-34s' "------"
+for ((i = 0; i < ${#groups[@]}; i++)); do printf ' %-18s' "------"; done
+echo
+
+for key in "${keys[@]}"; do
+  case "$key" in
+    variant|label|mode|cmdline|cpu|nproc|governor|scx|scx_state|kernel|monitors|pkg_*) continue ;;
+  esac
+  line=""
+  medians=()
+  missing=0
+  for g in "${groups[@]}"; do
+    IFS=$'\t' read -r med lo hi < <(stat_of "$g" "$key")
+    if [[ $med == "-" || $med == missing ]]; then
+      medians+=("")
+      line+="$(printf ' %-18s' "-")"
+    else
+      medians+=("$med")
+      if [[ $lo == "-" || $lo == "$med" ]]; then cell="$med"; else cell="$med [$lo..$hi]"; fi
+      line+="$(printf ' %-18s' "$cell")"
+    fi
+  done
+  base="${medians[0]:-}"
+  printf '%-34s%s' "$key" "$line"
+  if [[ -n $base ]] && numeric "$base" && (( ${#medians[@]} > 1 )); then
+    printf '   delta:'
+    for ((i = 1; i < ${#medians[@]}; i++)); do
+      m="${medians[i]}"
+      if [[ -n $m ]] && numeric "$m"; then
+        printf ' [%d]%+.1f%%' "$((i + 1))" "$(awk -v x="$base" -v y="$m" 'BEGIN { if (x == 0) print 0; else print (y - x) / x * 100 }')"
+      fi
+    done
+  fi
+  echo
 done
 
 echo
-echo "Latency and footprint metrics: lower is better."
-echo "RPS and bogo ops: higher is better."
-echo "Desktop CPU%, RSS, GPU mem/power/util and wakeups: lower is better."
+echo "Cells: median [min..max] over the runs in that group."
+echo "Lower is better: latency, footprint, CPU%, RSS, wakeups."
+echo "Higher is better: RPS, bogo ops, throughput."

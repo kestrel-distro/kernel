@@ -14,10 +14,12 @@ set -euo pipefail
 
 label="${1:-$(uname -r)}"
 here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-out="$here/results/$(date +%Y%m%d-%H%M%S)-${label//\//_}"
+out="${KESTREL_BENCH_OUT:-$here/results/$(date +%Y%m%d-%H%M%S)-${label//\//_}}"
 mkdir -p "$out"
 dur="${KESTREL_BENCH_SECONDS:-60}"
 mode="${KESTREL_BENCH_MODE:-all}"
+variant="${KESTREL_VARIANT:-unlabelled}"
+pkgs="${KESTREL_BENCH_PACKAGES:-linux linux-kestrel systemd hyprland quickshell foot zen-browser glibc}"
 
 case "$mode" in
   cpu|footprint|desktop|session|all) ;;
@@ -26,6 +28,33 @@ esac
 
 want() { [[ "$mode" == all || "$mode" == "$1" ]]; }
 have() { command -v "$1" >/dev/null 2>&1; }
+
+gpu_vram_used_mib() {
+  local f v
+  if have nvidia-smi; then
+    v="$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null | head -1)"
+    [[ -n $v ]] && { echo "$v"; return; }
+  fi
+  for f in /sys/class/drm/card*/device/mem_info_vram_used; do
+    [[ -r $f ]] || continue
+    v="$(<"$f")"
+    awk -v b="$v" 'BEGIN { printf "%.0f", b / 1048576 }'
+    return
+  done
+  echo missing
+}
+
+proc_vram_kb() {
+  local pid="$1" f k v total=0
+  [[ -n $pid && -r /proc/$pid/fdinfo ]] || { echo 0; return; }
+  for f in /proc/"$pid"/fdinfo/*; do
+    [[ -r $f ]] || continue
+    while read -r k v _; do
+      [[ $k == drm-memory-vram: ]] && total=$((total + ${v:-0}))
+    done <"$f"
+  done
+  echo "$total"
+}
 
 summary="$out/summary.txt"
 : >"$summary"
@@ -41,6 +70,28 @@ summary="$out/summary.txt"
   echo "scx_state=$(cat /sys/kernel/sched_ext/state 2>/dev/null || echo none)"
   echo "scx=$(scxctl get 2>/dev/null | tr '\n' ' ' || echo none)"
   echo "cmdline=$(</proc/cmdline)"
+  echo "gpu_vram_used_mib=$(gpu_vram_used_mib)"
+  if have hyprctl && have jq; then
+    monitors="$(hyprctl monitors -j 2>/dev/null | jq -r '.[] | "\(.name) \(.width)x\(.height)@\(.refreshRate) scale=\(.scale) format=\(.currentFormat // "?")"' 2>/dev/null | paste -sd'|' -)"
+    [[ -n $monitors ]] && echo "monitors=$monitors"
+  fi
+  echo "variant=$variant"
+  # Package versions make a result directory comparable after an update and
+  # let the package-codegen axis be checked from the artifact alone.
+  for p in $pkgs; do
+    v="$(pacman -Q "$p" 2>/dev/null | awk '{ print $2 }')" || true
+    [[ -n ${v:-} ]] && echo "pkg_${p}=$v"
+    sz="$(pacman -Qi "$p" 2>/dev/null | awk -F': ' '/^Installed Size/{ print $2; exit }')" || true
+    case "${sz:-}" in
+      *GiB) kb="$(awk -v x="${sz% GiB}" 'BEGIN { printf "%.0f", x * 1048576 }')" ;;
+      *MiB) kb="$(awk -v x="${sz% MiB}" 'BEGIN { printf "%.0f", x * 1024 }')" ;;
+      *KiB) kb="${sz% KiB}" ;;
+      *B)   kb="$(awk -v x="${sz% B}" 'BEGIN { printf "%.3f", x / 1024 }')" ;;
+      *)    kb="" ;;
+    esac
+    [[ -n $kb ]] && echo "pkg_${p}_installed_kb=$kb"
+  done
+  true
 } | tee "$summary" | sed 's/^/  /'
 
 # --- CPU and scheduler -------------------------------------------------------
@@ -211,6 +262,9 @@ if want desktop; then
     echo "desktop_quickshell_cpu_pct=$(cpu_pct quickshell)" >>"$summary"
     echo "desktop_hyprland_rss_kb=$(rss_kb Hyprland)" >>"$summary"
     echo "desktop_quickshell_rss_kb=$(rss_kb quickshell)" >>"$summary"
+    hp="$(pid_of Hyprland)"; qs="$(pid_of quickshell)"
+    echo "desktop_hyprland_vram_mib=$(awk -v k="$(proc_vram_kb "$hp")" 'BEGIN { printf "%.0f", k / 1024 }')" >>"$summary"
+    echo "desktop_quickshell_vram_mib=$(awk -v k="$(proc_vram_kb "$qs")" 'BEGIN { printf "%.0f", k / 1024 }')" >>"$summary"
 
     if have nvidia-smi; then
       read -r nvmem nvpow nvutil <<<"$(nvidia-smi \
@@ -243,31 +297,49 @@ if want session; then
     echo "session workload ${session_dur}s..."
     sess="$out/session"; mkdir -p "$sess"
 
-    class_root=/sys/fs/cgroup/kestrel.slice
+    class_root=
+    base="/sys/fs/cgroup/user.slice/user-$(id -u).slice"
+    for d in "$base"/user@*.service; do
+      [[ -d $d/kestrel.slice ]] && { class_root="$d/kestrel.slice"; break; }
+    done
+    [[ -n $class_root ]] || class_root="$base/kestrel.slice"
     class_pids() {
       local class="$1"
-      if [[ -d $class_root/$class ]]; then
-        find "$class_root/$class" -name cgroup.procs -exec cat {} + 2>/dev/null | sort -un
-        return
-      fi
-      case "$class" in
-        desktop) { pgrep -x Hyprland; pgrep -x quickshell; } 2>/dev/null || true ;;
-        term)    { pgrep -x foot; pgrep -x footclient; } 2>/dev/null || true ;;
-        browser) pgrep -f 'zen|Isolated Web Co|Web Content' 2>/dev/null || true ;;
-      esac
+      # Union of the class cgroup and the name match: the cgroup can be empty
+      # (bridge off) and the broker only places focused trees, so neither alone
+      # is complete. A stable class definition is what makes the variants
+      # comparable; placement itself is checked from the cgroup counts.
+      {
+        [[ -d $class_root/$class ]] &&
+          find "$class_root/$class" -name cgroup.procs -exec cat {} + 2>/dev/null || true
+        case "$class" in
+          desktop) { pgrep -x Hyprland; pgrep -x quickshell; } 2>/dev/null || true ;;
+          term)    { pgrep -x foot; pgrep -x footclient; } 2>/dev/null || true ;;
+          browser) pgrep -f 'zen|Isolated Web Co|Web Content' 2>/dev/null || true ;;
+        esac
+      } | sort -un
     }
 
-    # cpu=total jiffies, vol=voluntary context switches (wakeup proxy), rss=KiB
+    # cpu=total jiffies (process-wide), vol=voluntary context switches, rss=KiB,
+    # wait/slices=/proc/<pid>/schedstat fields 2 and 3 summed over the threads
+    # (runqueue wait, ns, and timeslices run). Wait per slice is the per-task
+    # scheduling latency.
     snapshot() {
-      local class="$1" p cpu=0 vol=0 rss=0 c v r
+      local class="$1" p t cpu=0 vol=0 rss=0 wait=0 slices=0 vram=0 c vv ww q vr
       while read -r p; do
         [[ -r /proc/$p/stat ]] || continue
         c="$(awk '{ print $14 + $15 }' "/proc/$p/stat" 2>/dev/null || echo 0)"
-        v="$(awk '/^voluntary_ctxt_switches:/{ print $2 }' "/proc/$p/status" 2>/dev/null || echo 0)"
         r="$(awk '/^VmRSS:/{ print $2 }' "/proc/$p/status" 2>/dev/null || echo 0)"
-        cpu=$((cpu + ${c:-0})); vol=$((vol + ${v:-0})); rss=$((rss + ${r:-0}))
+        vr="$(proc_vram_kb "$p")"
+        cpu=$((cpu + ${c:-0})); rss=$((rss + ${r:-0})); vram=$((vram + ${vr:-0}))
+        for t in /proc/"$p"/task/*; do
+          vv="$(awk '/^voluntary_ctxt_switches:/{ print $2 }' "$t/status" 2>/dev/null || true)"
+          read -r _ ww q <"$t/schedstat" 2>/dev/null || { ww=0; q=0; }
+          vol=$((vol + ${vv:-0}))
+          wait=$((wait + ${ww:-0})); slices=$((slices + ${q:-0}))
+        done
       done < <(class_pids "$class")
-      printf '%s %s %s\n' "$cpu" "$vol" "$rss"
+      printf '%s %s %s %s %s %s\n' "$cpu" "$vol" "$rss" "$wait" "$slices" "$vram"
     }
 
     start_workloads() {
@@ -297,15 +369,34 @@ if want session; then
           hyprctl dispatch workspace e-1 >/dev/null 2>&1 || true; sleep 1
         done
       ) &
+      # Contention is what the bridge is for; without it the interactive
+      # classes never queue and every variant looks identical.
+      if (( ${KESTREL_SESSION_BG_CPUS:-0} > 0 )) && have stress-ng; then
+        stress-ng --cpu "$KESTREL_SESSION_BG_CPUS" --cpu-method matrix \
+          --timeout "${secs}s" --metrics-brief >"$sess/background.txt" 2>&1 &
+        bg_pid=$!
+      fi
     }
+    bg_pid=
 
     classes=(desktop term browser)
-    declare -A c1 v1 r1
+    cgroup_count() {
+      [[ -d $class_root/$1 ]] || { echo 0; return; }
+      find "$class_root/$1" -name cgroup.procs -exec cat {} + 2>/dev/null | sort -un | wc -l | tr -d ' '
+    }
+    declare -A c1 v1 r1 w1 q1
     for c in "${classes[@]}"; do
-      read -r a b d < <(snapshot "$c")
-      c1[$c]="$a"; v1[$c]="$b"; r1[$c]="$d"
-      echo "$c cpu=$a vol=$b rss=$d" >>"$sess/before.txt"
+      read -r a b d e f g < <(snapshot "$c")
+      c1[$c]="$a"; v1[$c]="$b"; r1[$c]="$d"; w1[$c]="$e"; q1[$c]="$f"
+      echo "$c cpu=$a vol=$b rss=$d wait_ns=$e slices=$f vram_kb=$g" >>"$sess/before.txt"
+      echo "session_${c}_cgroup_pids=$(cgroup_count "$c")" >>"$summary"
     done
+    # Prove the variant really applied: the compositor hint is what "hints on"
+    # restores and "hints off" clears.
+    hp="$(pgrep -x Hyprland 2>/dev/null | head -1 || true)"
+    if [[ -n $hp ]]; then
+      echo "session_hyprland_hint=$(kestrel-hint get "$hp" 2>/dev/null || echo na)" >>"$summary"
+    fi
 
     t1="$(date +%s.%N)"
     start_workloads "$session_dur"
@@ -315,20 +406,31 @@ if want session; then
     hz="$(getconf CLK_TCK)"
     elapsed="$(awk -v a="$t1" -v b="$t2" 'BEGIN { printf "%.3f", b - a }')"
     for c in "${classes[@]}"; do
-      read -r a b d < <(snapshot "$c")
-      echo "$c cpu=$a vol=$b rss=$d" >>"$sess/after.txt"
+      read -r a b d e f g < <(snapshot "$c")
+      echo "$c cpu=$a vol=$b rss=$d wait_ns=$e slices=$f vram_kb=$g" >>"$sess/after.txt"
       cpu_pct="$(awk -v x="${c1[$c]}" -v y="$a" -v hz="$hz" -v e="$elapsed" \
         'BEGIN { if (e <= 0) print "missing"; else printf "%.2f", 100 * ((y - x) / hz) / e }')"
       wakeups="$(awk -v x="${v1[$c]}" -v y="$b" -v e="$elapsed" \
         'BEGIN { if (e <= 0) print "missing"; else printf "%.2f", (y - x) / e }')"
+      wait_avg="$(awk -v x="${w1[$c]}" -v y="$e" -v sx="${q1[$c]}" -v sy="$f" \
+        'BEGIN { ds = sy - sx; if (ds <= 0) print "missing"; else printf "%.2f", ((y - x) / ds) / 1000 }')"
       echo "session_${c}_cpu_pct=$cpu_pct" >>"$summary"
       echo "session_${c}_wakeups_per_s=$wakeups" >>"$summary"
       echo "session_${c}_rss_kb=${d:-missing}" >>"$summary"
+      echo "session_${c}_sched_wait_avg_us=$wait_avg" >>"$summary"
+      echo "session_${c}_vram_mib=$(awk -v k="${g:-0}" 'BEGIN { printf "%.0f", k / 1024 }')" >>"$summary"
     done
 
+    if [[ -n ${bg_pid:-} ]]; then
+      wait "$bg_pid" 2>/dev/null || true
+      bg_ops="$(awk '/bogo ops\/s/ { line = $0 } END { if (line != "") { n = split(line, a, " "); print a[n] } }' \
+        "$sess/background.txt" 2>/dev/null || true)"
+      echo "session_bg_bogo_ops=${bg_ops:-missing}" >>"$summary"
+    fi
     echo "session_terms=${KESTREL_SESSION_TERMS:-2}" >>"$summary"
     echo "session_tabs=${KESTREL_SESSION_TABS:-4}" >>"$summary"
     echo "session_seconds=$session_dur" >>"$summary"
+    echo "session_bg_cpus=${KESTREL_SESSION_BG_CPUS:-0}" >>"$summary"
     awk '{ print "session_uptime_s=" $1 }' /proc/uptime >>"$summary"
 
     # Best-effort system-wide wakeups while the workload runs.

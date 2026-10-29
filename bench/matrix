@@ -1,0 +1,158 @@
+#!/bin/bash
+
+# Interleaved factor matrix for the Kestrel bridge. Each variant pins the
+# scheduler (scx_loader), the broker/cgroups and the kernel hints, then runs the
+# standard harness under a label. Repeats are interleaved (not all A then all B)
+# and rotated so a warm-up drift cannot look like a variant effect.
+#
+# Usage: bench/matrix [label]
+# Variants: name:scheduler:mode:hints:cgroups, space separated.
+#           KESTREL_MATRIX_VARIANTS overrides the bridge set below.
+# Repeats:  KESTREL_MATRIX_REPS (default 5).
+# Mode:     KESTREL_MATRIX_MODE -> bench/run (default session).
+# Context:  KESTREL_MATRIX_LABEL names the image (default: detected packages
+#           and kernel), e.g. "packages=arch kernel=stock".
+# Load:     KESTREL_MATRIX_BG_CPUS is passed as the session background hog.
+# Results:  bench/results/<timestamp>-matrix-<label>/<variant>-rep<N>/
+
+set -euo pipefail
+
+label="${1:-matrix}"
+here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+reps="${KESTREL_MATRIX_REPS:-5}"
+mode="${KESTREL_MATRIX_MODE:-session}"
+bg="${KESTREL_MATRIX_BG_CPUS:-0}"
+session_seconds="${KESTREL_MATRIX_SESSION_SECONDS:-30}"
+root="$here/results/$(date +%Y%m%d-%H%M%S)-matrix-${label//\//_}"
+mkdir -p "$root"
+
+command -v scxctl >/dev/null || {
+  echo "scxctl not found; install scx-tools" >&2
+  exit 1
+}
+
+as_root() {
+  if (( EUID == 0 )); then "$@"; else sudo -n "$@"; fi
+}
+
+packages="${KESTREL_MATRIX_PACKAGES:-}"
+if [[ -z $packages ]]; then
+  packages=arch
+  [[ -d /usr/share/kestrel ]] && packages=kestrel
+fi
+kernel=kestrel
+pkgbase="$(cat "/usr/lib/modules/$(uname -r)/pkgbase" 2>/dev/null || true)"
+[[ $pkgbase == linux-kestrel ]] || kernel=stock
+context="${KESTREL_MATRIX_LABEL:-packages=$packages kernel=$kernel}"
+
+if [[ -n ${KESTREL_MATRIX_VARIANTS:-} ]]; then
+  read -r -a variants <<<"$KESTREL_MATRIX_VARIANTS"
+else
+  variants=(
+    default:scx_bpfland::off:off
+    cgroups:scx_bpfland::on:on
+    sched:scx_kestrel::off:off
+    bridge:scx_kestrel::on:on
+    hints:scx_kestrel::on:off
+  )
+fi
+
+# --- state controls ---------------------------------------------------------
+class_pids() {
+  local d
+  for d in /sys/fs/cgroup/user.slice/user-$(id -u).slice/user@$(id -u).service/kestrel.slice \
+           /sys/fs/cgroup/user.slice/user-$(id -u).slice/kestrel.slice; do
+    [[ -d $d ]] || continue
+    find "$d" -name cgroup.procs -exec cat {} + 2>/dev/null || true
+  done
+}
+
+# Hints are set by the apps themselves at startup; re-apply them so an "on"
+# variant after an "off" variant really has them, and zero them for "off".
+set_hints() {
+  local v="$1" pid tid
+  command -v kestrel-hint >/dev/null || return 0
+  if ! kestrel-hint supported >/dev/null 2>&1; then
+    return 0
+  fi
+  for pid in $(pgrep -x Hyprland 2>/dev/null) $(pgrep -x quickshell 2>/dev/null); do
+    for tid in /proc/"$pid"/task/*; do
+      kestrel-hint set "${tid##*/}" "$v" >/dev/null 2>&1 || true
+    done
+  done
+}
+
+set_cgroups() {
+  local on="$1" parent pid
+  if [[ $on == on ]]; then
+    systemctl --user start kestrel-slices.service kestrel-broker.service 2>/dev/null || true
+    return 0
+  fi
+  systemctl --user stop kestrel-broker.service 2>/dev/null || true
+  # Move whatever the broker placed back under the user manager, or the
+  # scheduler still sees the class cgroups this variant is meant to remove.
+  parent="/sys/fs/cgroup/user.slice/user-$(id -u).slice/user@$(id -u).service"
+  [[ -d $parent ]] || return 0
+  for pid in $(class_pids); do
+    [[ -r /proc/$pid/status ]] && printf '%s\n' "$pid" >"$parent/cgroup.procs" 2>/dev/null || true
+  done
+}
+
+set_scheduler() {
+  local sched="$1" m="$2" args
+  args=(switch --sched "$sched")
+  [[ -n $m ]] && args+=(--mode "$m")
+  as_root scxctl "${args[@]}"
+  for _ in $(seq 1 20); do
+    [[ "$(scxctl get 2>/dev/null | tr '\n' ' ')" == *"$sched"* ]] && break
+    sleep 0.5
+  done
+  if [[ "$(scxctl get 2>/dev/null | tr '\n' ' ')" != *"$sched"* ]]; then
+    echo "ERROR: scheduler did not switch to $sched" >&2
+    return 1
+  fi
+  sleep "${KESTREL_SCX_SETTLE:-5}"
+}
+
+apply() {
+  local spec="$1" name sched m hints cgroups
+  IFS=: read -r name sched m hints cgroups <<<"$spec"
+  [[ -n $sched ]] || { echo "bad variant '$spec'" >&2; return 1; }
+  set_cgroups "$cgroups"
+  set_hints "$([[ $hints == on ]] && echo 1 || echo 0)"
+  set_scheduler "$sched" "$m"
+}
+
+restore() {
+  as_root scxctl restore >/dev/null 2>&1 || true
+  systemctl --user start kestrel-slices.service kestrel-broker.service >/dev/null 2>&1 || true
+  set_hints 1
+}
+trap restore EXIT
+
+n=${#variants[@]}
+echo "context: $context"
+echo "variants: ${variants[*]}"
+echo "reps: $reps  mode: $mode  bg_cpus: $bg  seconds: $session_seconds"
+
+for ((r = 1; r <= reps; r++)); do
+  for ((i = 0; i < n; i++)); do
+    spec="${variants[$(((i + r - 1) % n))]}"
+    IFS=: read -r name sched m hints cgroups <<<"$spec"
+    echo
+    echo "== rep$r $name (sched=$sched${m:+ mode=$m} hints=$hints cgroups=$cgroups) =="
+    apply "$spec"
+
+    out="$root/$name-rep$r"
+    KESTREL_VARIANT="name=$name sched=$sched hints=$hints cgroups=$cgroups $context" \
+    KESTREL_BENCH_OUT="$out" \
+    KESTREL_BENCH_MODE="$mode" \
+    KESTREL_BENCH_SESSION_SECONDS="$session_seconds" \
+    KESTREL_SESSION_BG_CPUS="$bg" \
+      "$here/run" "$name-rep$r"
+  done
+done
+
+echo
+echo "compare with:"
+echo "  bench/compare $root/*"
