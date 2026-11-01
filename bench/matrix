@@ -103,11 +103,12 @@ set_scheduler() {
   args=(switch --sched "$sched")
   [[ -n $m ]] && args+=(--mode "$m")
   as_root scxctl "${args[@]}"
+  local short="${sched#scx_}"
   for _ in $(seq 1 20); do
-    [[ "$(scxctl get 2>/dev/null | tr '\n' ' ')" == *"$sched"* ]] && break
+    scxctl get 2>/dev/null | tr '[:upper:]' '[:lower:]' | grep -q -- "$short" && break
     sleep 0.5
   done
-  if [[ "$(scxctl get 2>/dev/null | tr '\n' ' ')" != *"$sched"* ]]; then
+  if ! scxctl get 2>/dev/null | tr '[:upper:]' '[:lower:]' | grep -q -- "$short"; then
     echo "ERROR: scheduler did not switch to $sched" >&2
     return 1
   fi

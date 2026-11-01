@@ -47,8 +47,9 @@ for pair in "${pairs[@]}"; do
 
   # Wait for the loader to report the new scheduler, then let the system settle
   # so the first benchmark second is not the switchover transient.
+  short="${sched#scx_}"
   for _ in $(seq 1 20); do
-    [[ "$(scxctl get 2>/dev/null | tr '\n' ' ')" == *"$sched"* ]] && break
+    scxctl get 2>/dev/null | tr '[:upper:]' '[:lower:]' | grep -q -- "$short" && break
     sleep 0.5
   done
   sleep "${KESTREL_SCX_SETTLE:-5}"

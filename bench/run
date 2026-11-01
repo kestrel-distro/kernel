@@ -33,7 +33,7 @@ gpu_vram_used_mib() {
   local f v
   if have nvidia-smi; then
     v="$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null | head -1)"
-    [[ -n $v ]] && { echo "$v"; return; }
+    [[ $v =~ ^[0-9]+$ ]] && { echo "$v"; return; }
   fi
   for f in /sys/class/drm/card*/device/mem_info_vram_used; do
     [[ -r $f ]] || continue
@@ -267,12 +267,18 @@ if want desktop; then
     echo "desktop_quickshell_vram_mib=$(awk -v k="$(proc_vram_kb "$qs")" 'BEGIN { printf "%.0f", k / 1024 }')" >>"$summary"
 
     if have nvidia-smi; then
-      read -r nvmem nvpow nvutil <<<"$(nvidia-smi \
-        --query-gpu=memory.used,power.draw,utilization.gpu \
-        --format=csv,noheader,nounits 2>/dev/null | head -1 | tr ',' ' ')"
-      echo "desktop_nvidia_mem_mib=${nvmem:-missing}" >>"$summary"
-      echo "desktop_nvidia_power_w=${nvpow:-missing}" >>"$summary"
-      echo "desktop_nvidia_util_pct=${nvutil:-missing}" >>"$summary"
+      nv="$(nvidia-smi --query-gpu=memory.used,power.draw,utilization.gpu \
+        --format=csv,noheader,nounits 2>/dev/null | head -1)"
+      IFS=, read -r nvmem nvpow nvutil <<<"$nv"
+      if [[ $nvmem =~ ^[[:space:]]*[0-9]+[[:space:]]*$ ]]; then
+        echo "desktop_nvidia_mem_mib=${nvmem// /}" >>"$summary"
+        echo "desktop_nvidia_power_w=${nvpow// /}" >>"$summary"
+        echo "desktop_nvidia_util_pct=${nvutil// /}" >>"$summary"
+      else
+        echo "desktop_nvidia_mem_mib=missing" >>"$summary"
+        echo "desktop_nvidia_power_w=missing" >>"$summary"
+        echo "desktop_nvidia_util_pct=missing" >>"$summary"
+      fi
     fi
 
     if have powertop && [[ $EUID -eq 0 ]]; then
