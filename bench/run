@@ -33,7 +33,7 @@ as_root() { if (( EUID == 0 )); then "$@"; else sudo -n "$@"; fi; }
 gpu_vram_used_mib() {
   local f v
   if have nvidia-smi; then
-    v="$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null | head -1)"
+    v="$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null | head -1 || true)"
     [[ $v =~ ^[0-9]+$ ]] && { echo "$v"; return; }
   fi
   for f in /sys/class/drm/card*/device/mem_info_vram_used; do
@@ -274,7 +274,7 @@ if want desktop; then
 
     if have nvidia-smi; then
       nv="$(nvidia-smi --query-gpu=memory.used,power.draw,utilization.gpu \
-        --format=csv,noheader,nounits 2>/dev/null | head -1)"
+        --format=csv,noheader,nounits 2>/dev/null | head -1 || true)"
       IFS=, read -r nvmem nvpow nvutil <<<"$nv" || true
       if [[ ${nvmem:-} =~ ^[[:space:]]*[0-9]+[[:space:]]*$ ]]; then
         echo "desktop_nvidia_mem_mib=${nvmem// /}" >>"$summary"
@@ -435,8 +435,7 @@ if want session; then
 
     if [[ -n ${bg_pid:-} ]]; then
       wait "$bg_pid" 2>/dev/null || true
-      bg_ops="$(awk '/bogo ops\/s/ { line = $0 } END { if (line != "") { n = split(line, a, " "); print a[n] } }' \
-        "$sess/background.txt" 2>/dev/null || true)"
+      bg_ops="$(awk '/stress-ng: metrc:/ && /cpu/ { print $(NF - 1) }' "$sess/background.txt" 2>/dev/null | tail -1 || true)"
       echo "session_bg_bogo_ops=${bg_ops:-missing}" >>"$summary"
     fi
     echo "session_terms=${KESTREL_SESSION_TERMS:-2}" >>"$summary"
