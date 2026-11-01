@@ -43,7 +43,7 @@ for pair in "${pairs[@]}"; do
   echo "switching to $sched${mode:+ ($mode)}..."
   args=(switch --sched "$sched")
   [[ -n $mode ]] && args+=(--mode "$mode")
-  as_root scxctl "${args[@]}"
+  as_root scxctl "${args[@]}" || true
 
   # Wait for the loader to report the new scheduler, then let the system settle
   # so the first benchmark second is not the switchover transient.

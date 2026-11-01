@@ -102,7 +102,7 @@ set_scheduler() {
   local sched="$1" m="$2" args
   args=(switch --sched "$sched")
   [[ -n $m ]] && args+=(--mode "$m")
-  as_root scxctl "${args[@]}"
+  as_root scxctl "${args[@]}" || true
   local short="${sched#scx_}"
   for _ in $(seq 1 20); do
     scxctl get 2>/dev/null | tr '[:upper:]' '[:lower:]' | grep -q -- "$short" && break

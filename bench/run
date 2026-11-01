@@ -28,6 +28,7 @@ esac
 
 want() { [[ "$mode" == all || "$mode" == "$1" ]]; }
 have() { command -v "$1" >/dev/null 2>&1; }
+as_root() { if (( EUID == 0 )); then "$@"; else sudo -n "$@"; fi; }
 
 gpu_vram_used_mib() {
   local f v
@@ -104,10 +105,14 @@ if want cpu; then
     awk '
       /Wakeup Latencies/  { w = 1 }
       /Request Latencies/ { w = 0 }
-      w && /50.0th:/ { p50 = $2 }
-      w && /90.0th:/ { p90 = $2 }
-      w && /99.0th:/ { p99 = $2 }
-      /^RPS:/ { rps = $2 }
+      w {
+        for (i = 1; i <= NF; i++) {
+          if ($i == "50.0th:") p50 = $(i + 1)
+          if ($i == "90.0th:") p90 = $(i + 1)
+          if ($i == "99.0th:") p99 = $(i + 1)
+        }
+      }
+      /^average rps:/ { rps = $3 }
       END {
         printf "schbench_wakeup_p50_us=%s\n", p50
         printf "schbench_wakeup_p90_us=%s\n", p90
@@ -121,7 +126,7 @@ if want cpu; then
   # Worst-case timer latency under load.
   if have cyclictest; then
     echo "cyclictest 30s..."
-    cyclictest --mlockall --smp --priority 99 --interval 200 --distance 0 \
+    as_root cyclictest --mlockall --smp --priority 99 --interval 200 --distance 0 \
       --loops 150000 >"$out/cyclictest.txt" 2>&1 || true
     awk '
       /^T:/ {
@@ -145,7 +150,7 @@ if want cpu; then
     echo "stress-ng 30s..."
     stress-ng --cpu 0 --cpu-method all --timeout 30s --metrics-brief \
       >"$out/stress-ng.txt" 2>&1 || true
-    ops=$(awk '/bogo ops\/s/ { line = $0 } END { if (line != "") { n = split(line, a, " "); print a[n] } }' "$out/stress-ng.txt")
+    ops=$(awk '/stress-ng: metrc:/ && /cpu/ { print $(NF - 1) }' "$out/stress-ng.txt" | tail -1)
     echo "stress_cpu_bogo_ops=${ops:-missing}" >>"$summary"
   else
     echo "stress_cpu_bogo_ops=missing" >>"$summary"
@@ -193,8 +198,9 @@ if want footprint; then
   # the "=" total can be "Xmin Y.ZZZs", so sum the terms instead of parsing it.
   if have systemd-analyze; then
     systemd-analyze >"$out/systemd-analyze.txt" 2>&1 || true
-    read -r bfw bld bkn bus <<<"$(awk '
+    read -r bfw bld bkn bus btotal <<<"$(awk '
       /Startup finished in/ {
+        total = $NF
         for (i = 1; i <= NF; i++) {
           if ($i == "(firmware)")  fw = $(i - 1)
           if ($i == "(loader)")    ld = $(i - 1)
@@ -202,7 +208,11 @@ if want footprint; then
           if ($i == "(userspace)") us = $(i - 1)
         }
       }
-      END { print fw, ld, kn, us }' "$out/systemd-analyze.txt")"
+      END {
+        print (fw == "" ? "-" : fw), (ld == "" ? "-" : ld),
+              (kn == "" ? "-" : kn), (us == "" ? "-" : us),
+              (total == "" ? "-" : total)
+      }' "$out/systemd-analyze.txt")"
     secs() {
       case "$1" in
         *ms)  awk -v v="${1%ms}"  'BEGIN { printf "%.3f", v / 1000 }' ;;
@@ -219,11 +229,7 @@ if want footprint; then
     echo "boot_loader_s=$ldv" >>"$summary"
     echo "boot_kernel_s=$knv" >>"$summary"
     echo "boot_userspace_s=$usv" >>"$summary"
-    echo "boot_total_s=$(awk -v a="$fwv" -v b="$ldv" -v c="$knv" -v d="$usv" '
-      BEGIN {
-        if (a == "missing" || b == "missing" || c == "missing" || d == "missing") print "missing"
-        else printf "%.3f", a + b + c + d
-      }')" >>"$summary"
+    echo "boot_total_s=$(secs "$btotal")" >>"$summary"
   else
     echo "boot_total_s=missing" >>"$summary"
   fi
@@ -269,8 +275,8 @@ if want desktop; then
     if have nvidia-smi; then
       nv="$(nvidia-smi --query-gpu=memory.used,power.draw,utilization.gpu \
         --format=csv,noheader,nounits 2>/dev/null | head -1)"
-      IFS=, read -r nvmem nvpow nvutil <<<"$nv"
-      if [[ $nvmem =~ ^[[:space:]]*[0-9]+[[:space:]]*$ ]]; then
+      IFS=, read -r nvmem nvpow nvutil <<<"$nv" || true
+      if [[ ${nvmem:-} =~ ^[[:space:]]*[0-9]+[[:space:]]*$ ]]; then
         echo "desktop_nvidia_mem_mib=${nvmem// /}" >>"$summary"
         echo "desktop_nvidia_power_w=${nvpow// /}" >>"$summary"
         echo "desktop_nvidia_util_pct=${nvutil// /}" >>"$summary"
