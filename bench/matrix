@@ -6,7 +6,9 @@
 # and rotated so a warm-up drift cannot look like a variant effect.
 #
 # Usage: bench/matrix [label]
-# Variants: name:scheduler:mode:hints:cgroups, space separated.
+# Variants: name:scheduler:mode:hints:cgroups[:layers-json], space separated.
+#           The optional sixth field installs an alternate scx_kestrel layer file
+#           before switching the scheduler, for interleaved layer A/B tests.
 #           KESTREL_MATRIX_VARIANTS overrides the bridge set below.
 # Repeats:  KESTREL_MATRIX_REPS (default 5).
 # Mode:     KESTREL_MATRIX_MODE -> bench/run (default session).
@@ -119,16 +121,37 @@ set_scheduler() {
   sleep "${KESTREL_SCX_SETTLE:-5}"
 }
 
+layers_src=/usr/share/scx_kestrel/kestrel-layers.json
+layers_saved="$root/.kestrel-layers.original"
+[[ -f $layers_src ]] && cp "$layers_src" "$layers_saved" 2>/dev/null || true
+
+install_layers() {
+  local src="$1"
+  [[ -f $layers_src ]] || return 0
+  if [[ -n $src ]]; then
+    [[ -f $src ]] || { echo "layer file not found: $src" >&2; return 1; }
+    cmp -s "$src" "$layers_src" && return 0
+    as_root install -m644 "$src" "$layers_src" || return 1
+  else
+    [[ -f $layers_saved ]] || return 0
+    cmp -s "$layers_saved" "$layers_src" && return 0
+    as_root install -m644 "$layers_saved" "$layers_src" || return 1
+  fi
+  as_root systemctl restart scx_loader >/dev/null 2>&1 || true
+}
+
 apply() {
-  local spec="$1" name sched m hints cgroups
-  IFS=: read -r name sched m hints cgroups <<<"$spec"
+  local spec="$1" name sched m hints cgroups layers
+  IFS=: read -r name sched m hints cgroups layers <<<"$spec"
   [[ -n $sched ]] || { echo "bad variant '$spec'" >&2; return 1; }
+  install_layers "$layers" || return 1
   set_scheduler "$sched" "$m"
   set_cgroups "$cgroups"
   set_hints "$([[ $hints == on ]] && echo 1 || echo 0)"
 }
 
 restore() {
+  install_layers "" >/dev/null 2>&1 || true
   as_root scxctl restore >/dev/null 2>&1 || true
   systemctl --user start kestrel-slices.service kestrel-broker.service >/dev/null 2>&1 || true
   set_hints 1
@@ -144,9 +167,9 @@ echo "reps: $reps  mode: $mode  bg_cpus: $bg  seconds: $session_seconds"
 for ((r = 1; r <= reps; r++)); do
   for ((i = 0; i < n; i++)); do
     spec="${variants[$(((i + r - 1) % n))]}"
-    IFS=: read -r name sched m hints cgroups <<<"$spec"
+    IFS=: read -r name sched m hints cgroups layers <<<"$spec"
     echo
-    echo "== rep$r $name (sched=$sched${m:+ mode=$m} hints=$hints cgroups=$cgroups) =="
+    echo "== rep$r $name (sched=$sched${m:+ mode=$m} hints=$hints cgroups=$cgroups${layers:+ layers=$layers}) =="
     apply "$spec"
 
     out="$root/$name-rep$r"
