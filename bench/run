@@ -135,6 +135,17 @@ top_report() {
     awk -F'\t' '{ printf "%s\t%s\t%s\n", $1, $2, $6 }' "$dir/after/top.tsv" |
       sort -k3 -nr | head -20
   } >"$outdir/top-rss.txt"
+  if [[ -f $outdir/top-cpu.txt ]]; then
+    {
+      tail -n +2 "$outdir/top-cpu.txt" | head -12 | while IFS=$'\t' read -r pid comm _; do
+        [[ -r /proc/$pid/wchan ]] || continue
+        echo "== $pid $comm"
+        echo "wchan: $(cat "/proc/$pid/wchan" 2>/dev/null || echo '?')"
+        as_root cat "/proc/$pid/stack" 2>/dev/null || true
+        echo
+      done
+    } >"$outdir/top-stacks.txt"
+  fi
   if [[ -f $dir/before/interrupts && -f $dir/after/interrupts ]]; then
     {
       printf 'irq\tdelta\tper_s\n'
