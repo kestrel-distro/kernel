@@ -134,6 +134,21 @@ top_memory_report() {
       echo
     done
   } >"$outdir/top-maps.txt"
+  {
+    tail -n +2 "$outdir/top-pss.txt" | head -3 | while IFS=$'\t' read -r pid comm _; do
+      echo "== $pid $comm"
+      awk '
+        /^[0-9a-f]+-[0-9a-f]+ / {
+          if (name != "") printf "%d\t%d\t%s\t%s\n", pss, size, perms, name
+          name = ($6 == "" ? "[anon]" : $6); perms = $2; pss = 0; size = 0; next
+        }
+        /^Size:/ { size = $2 }
+        /^Pss:/ { pss = $2 }
+        END { if (name != "") printf "%d\t%d\t%s\t%s\n", pss, size, perms, name }' \
+        "/proc/$pid/smaps" 2>/dev/null | sort -rn | head -30
+      echo
+    done
+  } >"$outdir/top-vmas.txt"
 }
 
 top_report() {
