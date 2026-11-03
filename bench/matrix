@@ -83,18 +83,21 @@ set_hints() {
 }
 
 set_cgroups() {
-  local on="$1" parent pid
+  local on="$1" parent off pid
   if [[ $on == on ]]; then
     systemctl --user start kestrel-slices.service kestrel-broker.service 2>/dev/null || true
     return 0
   fi
   systemctl --user stop kestrel-broker.service 2>/dev/null || true
-  # Move whatever the broker placed back under the user manager, or the
-  # scheduler still sees the class cgroups this variant is meant to remove.
+  # Move whatever the broker placed out of the class cgroups. The user manager's
+  # cgroup has children and controllers, so the no-internal-process rule rejects
+  # writing to it; use a leaf sibling that matches no Kestrel layer instead.
   parent="/sys/fs/cgroup/user.slice/user-$(id -u).slice/user@$(id -u).service"
   [[ -d $parent ]] || return 0
+  off="$parent/kestrel-off"
+  mkdir -p "$off" 2>/dev/null || true
   for pid in $(class_pids); do
-    [[ -r /proc/$pid/status ]] && printf '%s\n' "$pid" >"$parent/cgroup.procs" 2>/dev/null || true
+    [[ -r /proc/$pid/status ]] && printf '%s\n' "$pid" >"$off/cgroup.procs" 2>/dev/null || true
   done
 }
 
