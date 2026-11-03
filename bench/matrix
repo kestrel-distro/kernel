@@ -54,6 +54,7 @@ else
     sched:scx_kestrel::off:off
     bridge:scx_kestrel::on:on
     hints:scx_kestrel::on:off
+    lavd:scx_lavd::off:off
   )
 fi
 
