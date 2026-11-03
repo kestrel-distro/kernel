@@ -52,7 +52,7 @@ proc_vram_kb() {
     [[ -r $f ]] || continue
     while read -r k v _; do
       [[ $k == drm-memory-vram: ]] && total=$((total + ${v:-0}))
-    done <"$f"
+    done <"$f" 2>/dev/null || true
   done
   echo "$total"
 }
@@ -106,6 +106,34 @@ top_snapshot() {
       "$(cat "$p/comm" 2>/dev/null || echo '?')" "$((u + s))" "${v:-0}" "${n:-0}" "${r:-0}" \
       >>"$dir/top.tsv"
   done
+}
+
+top_memory_report() {
+  local outdir="$1" pid comm rss pss anon file shmem huge
+  [[ -f $outdir/top-rss.txt ]] || return 0
+  {
+    printf 'pid\tcomm\trss_kb\tpss_kb\tpss_anon_kb\tpss_file_kb\tpss_shmem_kb\tanon_huge_kb\n'
+    tail -n +2 "$outdir/top-rss.txt" | head -15 | while IFS=$'\t' read -r pid comm rss; do
+      [[ -r /proc/$pid/smaps_rollup ]] || continue
+      read -r pss anon file shmem huge < <(awk '
+        /^Pss:/{ p = $2 } /^Pss_Anon:/{ a = $2 } /^Pss_File:/{ f = $2 }
+        /^Pss_Shmem:/{ s = $2 } /^AnonHugePages:/{ h = $2 }
+        END { print p + 0, a + 0, f + 0, s + 0, h + 0 }' "/proc/$pid/smaps_rollup" 2>/dev/null) || continue
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$pid" "$comm" "$rss" "$pss" "$anon" "$file" "$shmem" "$huge"
+    done
+  } >"$outdir/top-pss.txt"
+  {
+    tail -n +2 "$outdir/top-pss.txt" | head -3 | while IFS=$'\t' read -r pid comm _; do
+      echo "== $pid $comm"
+      awk '
+        /^[0-9a-f]+-[0-9a-f]+ / { name = ($6 == "" ? "[anon]" : $6); next }
+        /^Pss:/ { pss[name] += $2 }
+        END { for (n in pss) printf "%d\t%s\n", pss[n], n }' \
+        "/proc/$pid/smaps" 2>/dev/null | sort -rn | head -20
+      echo
+    done
+  } >"$outdir/top-maps.txt"
 }
 
 top_report() {
@@ -231,11 +259,14 @@ if want cpu; then
       /Wakeup Latencies/  { sec = "w"; next }
       /Request Latencies/ { sec = "r"; next }
       /RPS percentiles/   { sec = "rps"; next }
-      /^[[:space:]]*(50.0th|90.0th|99.0th|99.9th):/ {
-        p = $1; sub(/:$/, "", p)
-        if (sec == "w") { if (p == "50.0th") w50 = $2; else if (p == "90.0th") w90 = $2; else if (p == "99.0th") w99 = $2; else w999 = $2 }
-        else if (sec == "r") { if (p == "50.0th") r50 = $2; else if (p == "90.0th") r90 = $2; else if (p == "99.0th") r99 = $2; else r999 = $2 }
-        else if (sec == "rps") { if (p == "50.0th") rps50 = $2; else if (p == "90.0th") rps90 = $2 }
+      {
+        p = ""; v = ""
+        for (i = 1; i <= NF; i++) if ($i ~ /^(50.0th|90.0th|99.0th|99.9th):$/) { p = $i; v = $(i + 1) }
+        if (p == "") next
+        sub(/:$/, "", p)
+        if (sec == "w") { if (p == "50.0th") w50 = v; else if (p == "90.0th") w90 = v; else if (p == "99.0th") w99 = v; else w999 = v }
+        else if (sec == "r") { if (p == "50.0th") r50 = v; else if (p == "90.0th") r90 = v; else if (p == "99.0th") r99 = v; else r999 = v }
+        else if (sec == "rps") { if (p == "50.0th") rps50 = v; else if (p == "90.0th") rps90 = v }
         next
       }
       /^[[:space:]]*min=/ {
@@ -638,6 +669,7 @@ if want session; then
     elapsed="$(awk -v a="$t1" -v b="$t2" 'BEGIN { printf "%.3f", b - a }')"
     "$here/sysstats" "$sysdir/before" "$sysdir/after" "$elapsed" >>"$summary" 2>/dev/null || true
     top_report "$sysdir" "$sess" "$elapsed" "$hz"
+    top_memory_report "$sess"
     for c in "${classes[@]}"; do
       read -r a b n d e f g h i j k l m o pa pf ps pd sw ah < <(snapshot "$c")
       echo "$c cpu=$a vol=$b nvol=$n rss=$d pss=$e wait_ns=$f slices=$g vram_kb=$h threads=$i minflt=$j majflt=$k readb=$l writeb=$m procs=$o pss_anon=$pa pss_file=$pf pss_shmem=$ps private_dirty=$pd swap=$sw anon_huge=$ah" >>"$sess/after.txt"
