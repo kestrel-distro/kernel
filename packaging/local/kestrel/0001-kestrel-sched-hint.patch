@@ -132,3 +132,12 @@ diff -ruN a/kernel/sched/syscalls.c b/kernel/sched/syscalls.c
  	}
  
  	kattr.size = min(usize, sizeof(kattr));
+@@ -596,6 +596,8 @@
+ 		if (dl_policy(policy) && dl_param_changed(p, attr))
+ 			goto change;
+ 		if (attr->sched_flags & SCHED_FLAG_UTIL_CLAMP)
+ 			goto change;
++		if (attr->sched_flags & SCHED_FLAG_KESTREL_HINT)
++			goto change;
+ 
+ 		p->sched_reset_on_fork = reset_on_fork;
