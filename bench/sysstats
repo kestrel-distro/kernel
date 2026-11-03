@@ -118,7 +118,10 @@ if [[ -f $a/meminfo ]]; then
       k = tolower($1)
       sub(/:$/, "", k)
       gsub(/[^a-z0-9_]/, "_", k)
-      if (k != "") printf "session_mem_%s_kb=%s\n", k, $2
+      if (k == "") next
+      suffix = "_kb"
+      if (k ~ /^hugepages_(total|free|resv|surp)$/) suffix = "_count"
+      printf "session_mem_%s%s=%s\n", k, suffix, $2
     }' "$a/meminfo"
 fi
 
