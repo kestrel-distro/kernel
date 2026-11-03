@@ -274,16 +274,6 @@ if want cpu; then
       /Wakeup Latencies/  { sec = "w"; next }
       /Request Latencies/ { sec = "r"; next }
       /RPS percentiles/   { sec = "rps"; next }
-      {
-        p = ""; v = ""
-        for (i = 1; i <= NF; i++) if ($i ~ /^(50.0th|90.0th|99.0th|99.9th):$/) { p = $i; v = $(i + 1) }
-        if (p == "") next
-        sub(/:$/, "", p)
-        if (sec == "w") { if (p == "50.0th") w50 = v; else if (p == "90.0th") w90 = v; else if (p == "99.0th") w99 = v; else w999 = v }
-        else if (sec == "r") { if (p == "50.0th") r50 = v; else if (p == "90.0th") r90 = v; else if (p == "99.0th") r99 = v; else r999 = v }
-        else if (sec == "rps") { if (p == "50.0th") rps50 = v; else if (p == "90.0th") rps90 = v }
-        next
-      }
       /^[[:space:]]*min=/ {
         for (i = 1; i <= NF; i++) {
           if ($i ~ /^min=/) { sub(/^min=/, "", $i); sub(/,/, "", $i); v = $i }
@@ -296,6 +286,16 @@ if want cpu; then
       /^average rps:/ { rps = $3 }
       /^current rps:/ { cur = $3 }
       /^sched delay:/ { msg = $4; worker = $7 }
+      {
+        p = ""; v = ""
+        for (i = 1; i <= NF; i++) if ($i ~ /^(50.0th|90.0th|99.0th|99.9th):$/) { p = $i; v = $(i + 1) }
+        if (p == "") next
+        sub(/:$/, "", p)
+        if (sec == "w") { if (p == "50.0th") w50 = v; else if (p == "90.0th") w90 = v; else if (p == "99.0th") w99 = v; else w999 = v }
+        else if (sec == "r") { if (p == "50.0th") r50 = v; else if (p == "90.0th") r90 = v; else if (p == "99.0th") r99 = v; else r999 = v }
+        else if (sec == "rps") { if (p == "50.0th") rps50 = v; else if (p == "90.0th") rps90 = v }
+        next
+      }
       END {
         out("schbench_wakeup_p50_us", w50); out("schbench_wakeup_p90_us", w90)
         out("schbench_wakeup_p99_us", w99); out("schbench_wakeup_p999_us", w999)
