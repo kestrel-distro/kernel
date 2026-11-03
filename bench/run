@@ -584,6 +584,7 @@ if want session; then
         "$panon" "$pfile" "$pshmem" "$pdirty" "$pswap" "$phuge"
     }
 
+    spawned_pids=()
     start_workloads() {
       local secs="$1"
       if [[ -z ${KESTREL_SESSION_NO_APPS:-} ]]; then
@@ -591,16 +592,19 @@ if want session; then
           local _i
           for ((_i = 0; _i < ${KESTREL_SESSION_TERMS:-2}; _i++)); do
             footclient -e sh -c "timeout $((secs + 5)) sh -c 'while :; do :; done'" >/dev/null 2>&1 &
+            spawned_pids+=($!)
           done
         elif have foot; then
           local _i
           for ((_i = 0; _i < ${KESTREL_SESSION_TERMS:-2}; _i++)); do
             foot -e sh -c "timeout $((secs + 5)) sh -c 'while :; do :; done'" >/dev/null 2>&1 &
+            spawned_pids+=($!)
           done
         fi
         if have zen-browser; then
           for ((_i = 0; _i < ${KESTREL_SESSION_TABS:-4}; _i++)); do
             zen-browser --new-tab about:blank >/dev/null 2>&1 &
+            spawned_pids+=($!)
           done
         fi
       fi
@@ -734,6 +738,17 @@ echo "session_${c}_sched_slices=$slices" >>"$summary"
     echo "session_seconds=$session_dur" >>"$summary"
     echo "session_bg_cpus=${KESTREL_SESSION_BG_CPUS:-0}" >>"$summary"
     awk '{ print "session_uptime_s=" $1 }' /proc/uptime >>"$summary"
+
+    if [[ ${KESTREL_SESSION_CLEAN:-0} == 1 ]]; then
+      # Reset the scripted workload between matrix cells, so a later cell does
+      # not inherit accumulated browser tabs and foot clients from an earlier
+      # one. The matrix enables this; standalone runs leave user apps alone.
+      for p in "${spawned_pids[@]}"; do kill "$p" 2>/dev/null || true; done
+      pkill -TERM -x zen-bin 2>/dev/null || true
+      pkill -TERM -x zen-browser 2>/dev/null || true
+      pkill -TERM -x footclient 2>/dev/null || true
+      sleep 1
+    fi
 
     # Best-effort system-wide wakeups while the workload runs.
     if have powertop && [[ $EUID -eq 0 ]]; then

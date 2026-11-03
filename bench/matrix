@@ -178,6 +178,7 @@ for ((r = 1; r <= reps; r++)); do
     KESTREL_BENCH_MODE="$mode" \
     KESTREL_BENCH_SESSION_SECONDS="$session_seconds" \
     KESTREL_SESSION_BG_CPUS="$bg" \
+    KESTREL_SESSION_CLEAN="${KESTREL_MATRIX_CLEAN:-1}" \
       "$here/run" "$name-rep$r"
 
     reason=""
