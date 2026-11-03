@@ -119,9 +119,9 @@ apply() {
   local spec="$1" name sched m hints cgroups
   IFS=: read -r name sched m hints cgroups <<<"$spec"
   [[ -n $sched ]] || { echo "bad variant '$spec'" >&2; return 1; }
+  set_scheduler "$sched" "$m"
   set_cgroups "$cgroups"
   set_hints "$([[ $hints == on ]] && echo 1 || echo 0)"
-  set_scheduler "$sched" "$m"
 }
 
 restore() {
@@ -131,6 +131,7 @@ restore() {
 }
 trap restore EXIT
 
+invalid=0
 n=${#variants[@]}
 echo "context: $context"
 echo "variants: ${variants[*]}"
@@ -151,9 +152,29 @@ for ((r = 1; r <= reps; r++)); do
     KESTREL_BENCH_SESSION_SECONDS="$session_seconds" \
     KESTREL_SESSION_BG_CPUS="$bg" \
       "$here/run" "$name-rep$r"
+
+    reason=""
+    summary="$out/summary.txt"
+    if [[ $hints == on ]]; then
+      hint="$(grep -E '^session_hyprland_hint=' "$summary" 2>/dev/null | cut -d= -f2- || true)"
+      [[ $hint == 1 ]] || reason="hint=${hint:-missing}"
+    fi
+    if [[ $cgroups == on ]]; then
+      pids="$(grep -E '^session_cgroup_total=' "$summary" 2>/dev/null | cut -d= -f2- || true)"
+      [[ ${pids:-0} -gt 0 ]] || reason="${reason:+$reason }cgroups=${pids:-0}"
+    fi
+    if [[ -n $reason ]]; then
+      printf 'invalid: %s\n' "$reason" >"$out/INVALID"
+      echo "INVALID rep$r $name: $reason" >&2
+      invalid=1
+    fi
   done
 done
 
 echo
+if (( invalid )); then
+  echo "ERROR: at least one variant did not apply its requested factors" >&2
+fi
 echo "compare with:"
 echo "  bench/compare $root/*"
+exit "$invalid"

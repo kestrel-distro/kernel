@@ -85,13 +85,21 @@ trap cleanup EXIT
 say "idle desktop"
 KESTREL_BENCH_MODE=desktop KESTREL_BENCH_OUT="$out/desktop" ./run desktop || true
 
+say "browser pre-open"
+if [[ -z ${KESTREL_SESSION_NO_PREOPEN:-} ]] && have zen; then
+  zen about:blank >/dev/null 2>&1 &
+  for _ in 1 2 3; do zen --new-tab about:blank >/dev/null 2>&1 & done
+  sleep 3
+fi
+
 say "full matrix"
+matrix_rc=0
 KESTREL_MATRIX_REPS="${KESTREL_BENCH_REPS:-5}" \
 KESTREL_MATRIX_MODE="${KESTREL_BENCH_MODE:-all}" \
 KESTREL_MATRIX_BG_CPUS="${KESTREL_BENCH_BG_CPUS:-4}" \
 KESTREL_MATRIX_SESSION_SECONDS="${KESTREL_BENCH_SESSION_SECONDS:-30}" \
 KESTREL_SESSION_TABS="${KESTREL_SESSION_TABS:-0}" \
-  ./matrix live || true
+  ./matrix live || matrix_rc=$?
 
 matrix_dir="$(ls -1d results/*-matrix-live 2>/dev/null | tail -1 || true)"
 if [[ -n $matrix_dir ]]; then
@@ -130,3 +138,4 @@ fi
 
 say "done"
 echo "results: $out"
+exit "$matrix_rc"

@@ -26,6 +26,10 @@ declare -A key_seen
 for d in "$@"; do
   d="${d%/}"
   [[ -f $d/summary.txt ]] || { echo "compare: no summary.txt in $d" >&2; continue; }
+  if [[ -e $d/INVALID ]]; then
+    echo "compare: skipping invalid result $d: $(<"$d/INVALID")" >&2
+    continue
+  fi
   v="$(grep -E '^variant=' "$d/summary.txt" | head -1 | cut -d= -f2- || true)"
   [[ -z $v || $v == unlabelled ]] && v="$(basename "$d")"
   if [[ -z ${group_seen[$v]:-} ]]; then group_seen[$v]=1; groups+=("$v"); fi
