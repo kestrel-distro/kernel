@@ -122,3 +122,13 @@ diff -ruN a/kernel/sched/syscalls.c b/kernel/sched/syscalls.c
  				scope->flags |= ENQUEUE_HEAD;
  		}
  	}
+@@ -1098,6 +1098,9 @@
+ 		kattr.sched_util_min = p->uclamp_req[UCLAMP_MIN].value;
+ 		kattr.sched_util_max = p->uclamp_req[UCLAMP_MAX].value;
+ #endif
++#ifdef CONFIG_SCHED_CLASS_EXT
++		kattr.sched_ext_hint = READ_ONCE(p->scx.hint);
++#endif
+ 	}
+ 
+ 	kattr.size = min(usize, sizeof(kattr));
