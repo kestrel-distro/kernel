@@ -60,7 +60,7 @@ if [[ ! -S ${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/foot.sock ]]; then
     { pgrep -f '^foot --server' >/dev/null || (foot --server >/dev/null 2>&1 &); }
 fi
 
-peak_apps=(Hyprland quickshell foot footclient kestrel-broker zen chromium)
+peak_apps=(Hyprland quickshell foot footclient kestrel-broker zen-browser chromium)
 : >"$out/mem-peak.raw"
 (
   while :; do
@@ -86,9 +86,9 @@ say "idle desktop"
 KESTREL_BENCH_MODE=desktop KESTREL_BENCH_OUT="$out/desktop" ./run desktop || true
 
 say "browser pre-open"
-if [[ -z ${KESTREL_SESSION_NO_PREOPEN:-} ]] && have zen; then
-  zen about:blank >/dev/null 2>&1 &
-  for _ in 1 2 3; do zen --new-tab about:blank >/dev/null 2>&1 & done
+if [[ -z ${KESTREL_SESSION_NO_PREOPEN:-} ]] && have zen-browser; then
+  zen-browser about:blank >/dev/null 2>&1 &
+  for _ in 1 2 3; do zen-browser --new-tab about:blank >/dev/null 2>&1 & done
   sleep 3
 fi
 

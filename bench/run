@@ -382,9 +382,9 @@ if want session; then
             foot -e sh -c "timeout $((secs + 5)) sh -c 'while :; do :; done'" >/dev/null 2>&1 &
           done
         fi
-        if have zen; then
+        if have zen-browser; then
           for ((_i = 0; _i < ${KESTREL_SESSION_TABS:-4}; _i++)); do
-            zen --new-tab about:blank >/dev/null 2>&1 &
+            zen-browser --new-tab about:blank >/dev/null 2>&1 &
           done
         fi
       fi
