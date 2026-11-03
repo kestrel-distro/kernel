@@ -130,7 +130,7 @@ top_memory_report() {
         /^[0-9a-f]+-[0-9a-f]+ / { name = ($6 == "" ? "[anon]" : $6); next }
         /^Pss:/ { pss[name] += $2 }
         END { for (n in pss) printf "%d\t%s\n", pss[n], n }' \
-        "/proc/$pid/smaps" 2>/dev/null | sort -rn | head -20
+        "/proc/$pid/smaps" 2>/dev/null | sort -rn | head -20 || true
       echo
     done
   } >"$outdir/top-maps.txt"
@@ -145,7 +145,7 @@ top_memory_report() {
         /^Size:/ { size = $2 }
         /^Pss:/ { pss = $2 }
         END { if (name != "") printf "%d\t%d\t%s\t%s\n", pss, size, perms, name }' \
-        "/proc/$pid/smaps" 2>/dev/null | sort -rn | head -30
+        "/proc/$pid/smaps" 2>/dev/null | sort -rn | head -30 || true
       echo
     done
   } >"$outdir/top-vmas.txt"
@@ -161,7 +161,7 @@ top_report() {
       ($1 in c) {
         printf "%s\t%s\t%.2f\t%.2f\t%.2f\n", $1, $2,
           100 * (($3 - c[$1]) / hz) / e, ($4 - v[$1]) / e, ($5 - n[$1]) / e
-      }' "$dir/before/top.tsv" "$dir/after/top.tsv" | sort -k3 -nr | head -20
+      }' "$dir/before/top.tsv" "$dir/after/top.tsv" | sort -k3 -nr | head -20 || true
   } >"$outdir/top-cpu.txt"
   {
     printf 'pid\tcomm\tcpu_pct\tvol_s\tinvol_s\tctx_s\n'
@@ -171,12 +171,12 @@ top_report() {
         printf "%s\t%s\t%.2f\t%.2f\t%.2f\t%.2f\n", $1, $2,
           100 * (($3 - c[$1]) / hz) / e, ($4 - v[$1]) / e, ($5 - n[$1]) / e,
           (($4 - v[$1]) + ($5 - n[$1])) / e
-      }' "$dir/before/top.tsv" "$dir/after/top.tsv" | sort -k6 -nr | head -20
+      }' "$dir/before/top.tsv" "$dir/after/top.tsv" | sort -k6 -nr | head -20 || true
   } >"$outdir/top-wakeups.txt"
   {
     printf 'pid\tcomm\trss_kb\n'
     awk -F'\t' '{ printf "%s\t%s\t%s\n", $1, $2, $6 }' "$dir/after/top.tsv" |
-      sort -k3 -nr | head -20
+      sort -k3 -nr | head -20 || true
   } >"$outdir/top-rss.txt"
   if [[ -f $outdir/top-cpu.txt ]]; then
     {
@@ -204,7 +204,7 @@ top_report() {
           if ($1 !~ /^[0-9]+:$/) next
           s = 0; for (i = 2; i <= NF; i++) { if ($i !~ /^[0-9]+$/) break; s += $i }
           printf "%s\t%d\t%.2f\n", $1, s - old[$1], (s - old[$1]) / e
-        }' "$dir/before/interrupts" "$dir/after/interrupts" | sort -k3 -nr | head -20
+        }' "$dir/before/interrupts" "$dir/after/interrupts" | sort -k3 -nr | head -20 || true
     } >"$outdir/top-irqs.txt"
   fi
   if [[ -f $dir/before/softirqs && -f $dir/after/softirqs ]]; then
@@ -218,7 +218,7 @@ top_report() {
         {
           s = 0; for (i = 2; i <= NF; i++) if ($i ~ /^[0-9]+$/) s += $i
           printf "%s\t%d\t%.2f\n", $1, s - old[$1], (s - old[$1]) / e
-        }' "$dir/before/softirqs" "$dir/after/softirqs" | sort -k3 -nr | head -20
+        }' "$dir/before/softirqs" "$dir/after/softirqs" | sort -k3 -nr | head -20 || true
     } >"$outdir/top-softirqs.txt"
   fi
 }
