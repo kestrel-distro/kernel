@@ -27,7 +27,7 @@ rotated** so a warm-up drift cannot look like a variant effect.
 | `cgroups` | `scx_bpfland` | on | on | broker/cgroups alone |
 | `sched` | `scx_kestrel` | off | off | scheduler alone |
 | `bridge` | `scx_kestrel` | on | on | the full bridge |
-| `hints` | `scx_kestrel` | on | off | hint value vs scheduler |
+| `hints` | `scx_kestrel` | off | on | hint value vs scheduler |
 
 Variant syntax is `name:scheduler:mode:hints:cgroups`; override the set with
 `KESTREL_MATRIX_VARIANTS="..."`. `KESTREL_MATRIX_MODE` (default `session`),
@@ -92,11 +92,23 @@ reports CPU%, wakeups/s, RSS and scheduling wait for three classes:
 
 Class membership prefers the `kestrel.slice` cgroup hierarchy when it exists
 (`/sys/fs/cgroup/kestrel.slice/<class>`), and otherwise falls back to process
-name, so it works before the class hierarchy is deployed. Wakeups are a
-`voluntary_ctxt_switches` delta. Scheduling wait is the `/proc/<pid>/schedstat`
-runqueue-wait delta divided by the timeslice delta, per class: a rootless,
-per-task latency that does not need tracefs. `perf sched` is not used because
-it needs tracefs and writes large captures; `bench/profile` covers hotspots.
+name, so it works before the class hierarchy is deployed. Wakeups are the
+`voluntary_ctxt_switches` delta; involuntary switches, total context switches,
+minor/major faults, I/O bytes, PSS, thread/process counts and scheduling wait
+are also recorded. Scheduling wait is the `/proc/<pid>/schedstat` runqueue-wait
+delta divided by the timeslice delta, per class: a rootless, per-task latency
+that does not need tracefs. `perf sched` is not used because it needs tracefs
+and writes large captures; `bench/profile` covers hotspots.
+
+Around the workload the harness snapshots `/proc/stat`, `/proc/vmstat`, all of
+`/proc/meminfo`, PSI, `/proc/interrupts`, `/proc/softirqs`, `/proc/diskstats`,
+`/proc/net/dev`, cpufreq, thermal zones and RAPL. `session/system/` keeps the
+raw before/after files; `bench/sysstats` turns them into `session_sys_*`,
+`session_cpu*_busy_pct`, `session_vm_*`, `session_mem_*`, `session_psi_*`,
+`session_disk_*`, `session_net_*`, `session_cpufreq_*`, `session_thermal_*` and
+`session_rapl_*` metrics. Per-process hotspots for the workload land in
+`session/top-cpu.txt`, `top-wakeups.txt`, `top-rss.txt`, `top-irqs.txt` and
+`top-softirqs.txt`.
 
 `KESTREL_SESSION_TERMS` (foot surfaces), `KESTREL_SESSION_TABS` (Zen tabs),
 `KESTREL_SESSION_BG_CPUS` (stress-ng CPU hogs for contention; `session_bg_bogo_ops`
@@ -128,10 +140,12 @@ switching), not on an idle desktop.
 
 | Key | Group | Tool | Better |
 |---|---|---|---|
-| `schbench_wakeup_p50/p90/p99_us` | cpu | schbench | lower |
-| `schbench_rps` | cpu | schbench | higher |
-| `cyclictest_max_us`, `cyclictest_avg_us` | cpu | cyclictest | lower |
-| `stress_cpu_bogo_ops` | cpu | stress-ng | higher |
+| `schbench_wakeup_p50/p90/p99/p999/min/max_us` | cpu | schbench | lower |
+| `schbench_request_p50/p90/p99/p999/min/max_us` | cpu | schbench | lower |
+| `schbench_rps`, `schbench_current_rps`, `schbench_rps_p50/p90` | cpu | schbench | higher |
+| `schbench_sched_delay_msg/worker_us` | cpu | schbench | lower |
+| `cyclictest_min/max/avg_us` | cpu | cyclictest | lower |
+| `stress_cpu_bogo_ops`, `_total`, `_real_s`, `_usr_s`, `_sys_s`, `_usr_sys_ops_s` | cpu | stress-ng | higher/lower |
 | `kernel_image_bytes` | footprint | stat | lower |
 | `modules_bytes`, `modules_count`, `loaded_modules` | footprint | du/find/ls | lower |
 | `meminfo_slab_kb`, `SReclaimable`, `SUnreclaim`, `KernelStack`, `PageTables`, `VmallocUsed` | footprint | /proc/meminfo | lower |
@@ -143,13 +157,25 @@ switching), not on an idle desktop.
 | `session_{desktop,term,browser}_cpu_pct` | session | /proc | lower |
 | `session_{desktop,term,browser}_wakeups_per_s` | session | /proc | lower |
 | `session_{desktop,term,browser}_rss_kb` | session | /proc | lower |
-| `session_{desktop,term,browser}_sched_wait_avg_us` | session | /proc/schedstat | lower |
+| `session_{desktop,term,browser}_sched_wait_avg_us`, `_sched_wait_total_ms`, `_sched_slices` | session | /proc/schedstat | lower |
+| `session_{desktop,term,browser}_{pss,rss}_kb`, `_threads`, `_procs` | session | /proc | lower |
+| `session_{desktop,term,browser}_involuntary_per_s`, `_ctx_switches_per_s` | session | /proc | lower |
+| `session_{desktop,term,browser}_minflt_per_s`, `_majflt_per_s`, `_read_kb`, `_write_kb` | session | /proc | lower |
 | `session_{desktop,term,browser}_vram_mib` | session | fdinfo | lower |
 | `desktop_{hyprland,quickshell}_vram_mib` | desktop | fdinfo | lower |
 | `gpu_vram_used_mib` | all | nvidia-smi / sysfs | lower |
 | `session_{desktop,term,browser}_cgroup_pids`, `session_hyprland_hint` | session | cgroupfs, `kestrel-hint` | validity check |
 | `session_bg_bogo_ops` | session | stress-ng | higher |
 | `session_powertop_wakeups` | session | powertop (root) | lower |
+| `session_sys_cpu_*`, `session_cpu<N>_busy_pct`, `session_sys_cpu_busy_{max,min}_pct` | session | /proc/stat | lower |
+| `session_sys_{ctxt_switches,processes,interrupts,softirqs}_per_s`, `session_sys_intr_stat_per_s`, `session_sys_softirq_stat_per_s` | session | /proc/stat, /proc/interrupts, /proc/softirqs | lower |
+| `session_sys_load1/5/15`, `running`, `threads`, `procs_running`, `procs_blocked` | session | /proc/loadavg, /proc/stat | lower |
+| `session_vm_*` | session | /proc/vmstat | lower |
+| `session_mem_*_kb` | session | /proc/meminfo | lower |
+| `session_psi_{cpu,memory,io}_{some,full}_*` | session | /proc/pressure | lower |
+| `session_disk_{read,write}_{iops,kb}`, `_io_ms`, `_io_pct` | session | /proc/diskstats | lower |
+| `session_net_{rx,tx}_{kb,packets}` | session | /proc/net/dev | lower |
+| `session_cpufreq_*`, `session_thermal_max_c`, `session_rapl_{energy_j,power_w}` | session | sysfs | context |
 
 Missing tools are recorded as `missing` and skipped by `compare`.
 

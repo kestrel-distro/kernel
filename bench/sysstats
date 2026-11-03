@@ -1,0 +1,263 @@
+#!/bin/bash
+
+# Turn the /proc, /sys and cpufreq snapshots taken by bench/run around the
+# session workload into comparison metrics. Raw snapshots stay next to the
+# results so a new counter can be extracted without re-running the matrix.
+
+set -euo pipefail
+
+(( $# == 3 )) || {
+  echo "usage: sysstats <before-dir> <after-dir> <elapsed-seconds>" >&2
+  exit 2
+}
+b="${1%/}"
+a="${2%/}"
+e="$3"
+
+[[ -d $b && -d $a ]] || exit 0
+awk -v e="$e" 'BEGIN { if (e <= 0) exit 1 }' </dev/null || exit 0
+
+# --- CPU totals and per-CPU utilisation -------------------------------------
+if [[ -f $b/stat && -f $a/stat ]]; then
+  awk -v e="$e" '
+    function pct(x, t) { return t > 0 ? 100 * x / t : 0 }
+    FNR == NR {
+      if ($1 == "cpu" || $1 ~ /^cpu[0-9]+$/)
+        for (i = 2; i <= 9; i++) old[$1, i] = $i
+      next
+    }
+    $1 == "cpu" || $1 ~ /^cpu[0-9]+$/ {
+      tot = 0
+      for (i = 2; i <= 9; i++) {
+        d = $i - old[$1, i]
+        if (d < 0) d = 0
+        v[$1, i] = d
+        tot += d
+      }
+      if (tot <= 0) next
+      idle = v[$1, 5]
+      iow = v[$1, 6]
+      busy = tot - idle - iow
+      if ($1 == "cpu") {
+        printf "session_sys_cpu_busy_pct=%.2f\n", pct(busy, tot)
+        printf "session_sys_cpu_user_pct=%.2f\n", pct(v[$1, 2] + v[$1, 3], tot)
+        printf "session_sys_cpu_system_pct=%.2f\n", pct(v[$1, 4], tot)
+        printf "session_sys_cpu_idle_pct=%.2f\n", pct(idle, tot)
+        printf "session_sys_cpu_iowait_pct=%.2f\n", pct(iow, tot)
+        printf "session_sys_cpu_irq_pct=%.2f\n", pct(v[$1, 7], tot)
+        printf "session_sys_cpu_softirq_pct=%.2f\n", pct(v[$1, 8], tot)
+        printf "session_sys_cpu_steal_pct=%.2f\n", pct(v[$1, 9], tot)
+        printf "session_sys_cpu_total_jiffies=%d\n", tot
+      } else {
+        n = $1; sub(/^cpu/, "", n)
+        p = pct(busy, tot)
+        printf "session_cpu%s_busy_pct=%.2f\n", n, p
+        if (++cpus == 1 || p < min) min = p
+        if (p > max) max = p
+      }
+    }
+    END {
+      printf "session_sys_cpu_busy_max_pct=%.2f\n", max
+      printf "session_sys_cpu_busy_min_pct=%.2f\n", min
+      printf "session_sys_cpus=%d\n", cpus
+    }' "$b/stat" "$a/stat"
+
+  # Context switches, forks, interrupts and run-queue gauges.
+  awk -v e="$e" '
+    FNR == NR {
+      if ($1 == "ctxt") c1 = $2
+      if ($1 == "processes") p1 = $2
+      if ($1 == "intr") i1 = $2
+      if ($1 == "softirq") s1 = $2
+      next
+    }
+    {
+      if ($1 == "ctxt") c2 = $2
+      if ($1 == "processes") p2 = $2
+      if ($1 == "intr") i2 = $2
+      if ($1 == "softirq") s2 = $2
+      if ($1 == "procs_running") run = $2
+      if ($1 == "procs_blocked") blk = $2
+    }
+    END {
+      printf "session_sys_ctxt_switches_per_s=%.2f\n", (c2 - c1) / e
+      printf "session_sys_processes_per_s=%.2f\n", (p2 - p1) / e
+      printf "session_sys_intr_stat_per_s=%.2f\n", (i2 - i1) / e
+      printf "session_sys_softirq_stat_per_s=%.2f\n", (s2 - s1) / e
+      printf "session_sys_procs_running=%d\n", run
+      printf "session_sys_procs_blocked=%d\n", blk
+    }' "$b/stat" "$a/stat"
+fi
+
+# --- VM counters -----------------------------------------------------------
+if [[ -f $b/vmstat && -f $a/vmstat ]]; then
+  awk -v e="$e" '
+    BEGIN {
+      split("pgfault pgmajfault pgscan_direct pgsteal_direct pgscan_kswapd " \
+            "pgsteal_kswapd allocstall compactstall workingset_refault_anon " \
+            "workingset_refault_file pswpin pswpout numa_hit numa_miss " \
+            "numa_foreign oom_kill pgfree pgactivate pgdeactivate", w, " ")
+      for (i in w) want[w[i]] = 1
+    }
+    FNR == NR { if ($1 in want) old[$1] = $2; next }
+    {
+      if (!($1 in want)) next
+      d = $2 - old[$1]
+      if (d < 0) d = 0
+      if ($1 == "pgfault" || $1 == "pgmajfault")
+        printf "session_vm_%s_per_s=%.2f\n", $1, d / e
+      else
+        printf "session_vm_%s=%d\n", $1, d
+    }' "$b/vmstat" "$a/vmstat"
+fi
+
+# --- Memory, all of /proc/meminfo ------------------------------------------
+if [[ -f $a/meminfo ]]; then
+  awk '
+    {
+      k = tolower($1)
+      sub(/:$/, "", k)
+      gsub(/[^a-z0-9_]/, "_", k)
+      if (k != "") printf "session_mem_%s_kb=%s\n", k, $2
+    }' "$a/meminfo"
+fi
+
+# --- Pressure stall information --------------------------------------------
+for res in cpu memory io; do
+  [[ -f $b/pressure-$res && -f $a/pressure-$res ]] || continue
+  awk -v res="$res" -v e="$e" '
+    FNR == NR {
+      if ($1 == "some" || $1 == "full")
+        for (i = 2; i <= NF; i++) { split($i, x, "="); old[$1, x[1]] = x[2] }
+      next
+    }
+    $1 == "some" || $1 == "full" {
+      for (i = 2; i <= NF; i++) {
+        split($i, x, "=")
+        if (x[1] == "total") {
+          d = x[2] - old[$1, x[1]]
+          if (d < 0) d = 0
+          printf "session_psi_%s_%s_total_us_per_s=%.2f\n", res, $1, d / e
+        } else {
+          printf "session_psi_%s_%s_%s=%.2f\n", res, $1, x[1], x[2]
+        }
+      }
+    }' "$b/pressure-$res" "$a/pressure-$res"
+done
+
+# --- Interrupt and softirq rates -------------------------------------------
+for f in interrupts softirqs; do
+  [[ -f $b/$f && -f $a/$f ]] || continue
+  awk -v name="$f" -v e="$e" '
+    FNR == NR {
+      for (i = 2; i <= NF; i++) if ($i ~ /^[0-9]+$/) s1 += $i
+      next
+    }
+    {
+      for (i = 2; i <= NF; i++) if ($i ~ /^[0-9]+$/) s2 += $i
+    }
+    END { printf "session_sys_%s_per_s=%.2f\n", name, (s2 - s1) / e }' \
+    "$b/$f" "$a/$f"
+done
+
+# --- Block I/O on whole disks ----------------------------------------------
+if [[ -f $b/diskstats && -f $a/diskstats ]]; then
+  awk -v e="$e" '
+    function whole(d) { return d ~ /^(sd[a-z]+|vd[a-z]+|nvme[0-9]+n[0-9]+|mmcblk[0-9]+|xvd[a-z]+)$/ }
+    FNR == NR {
+      if (whole($3)) { r[$3] = $4; rs[$3] = $6; w[$3] = $8; ws[$3] = $10; io[$3] = $13 }
+      next
+    }
+    {
+      if (!whole($3)) next
+      dr += $4 - r[$3]; drs += $6 - rs[$3]
+      dw += $8 - w[$3]; dws += $10 - ws[$3]; dio += $13 - io[$3]
+    }
+    END {
+      printf "session_disk_read_iops=%.2f\n", dr / e
+      printf "session_disk_write_iops=%.2f\n", dw / e
+      printf "session_disk_read_kb=%.2f\n", drs * 0.5
+      printf "session_disk_write_kb=%.2f\n", dws * 0.5
+      printf "session_disk_io_ms=%d\n", dio
+      printf "session_disk_io_pct=%.2f\n", dio / (e * 1000) * 100
+    }' "$b/diskstats" "$a/diskstats"
+fi
+
+# --- Network ----------------------------------------------------------------
+if [[ -f $b/netdev && -f $a/netdev ]]; then
+  awk -v e="$e" '
+    FNR == NR {
+      p = index($0, ":"); if (!p) next
+      name = substr($0, 1, p - 1); gsub(/[[:space:]]/, "", name)
+      split(substr($0, p + 1), f)
+      for (i = 1; i <= 12; i++) old[name, i] = f[i] + 0
+      next
+    }
+    {
+      p = index($0, ":"); if (!p) next
+      name = substr($0, 1, p - 1); gsub(/[[:space:]]/, "", name)
+      split(substr($0, p + 1), f)
+      rx += f[1] - old[name, 1]; rp += f[2] - old[name, 2]
+      tx += f[9] - old[name, 9]; tp += f[10] - old[name, 10]
+    }
+    END {
+      printf "session_net_rx_kb=%.2f\n", rx / 1024
+      printf "session_net_tx_kb=%.2f\n", tx / 1024
+      printf "session_net_rx_packets=%d\n", rp
+      printf "session_net_tx_packets=%d\n", tp
+    }' "$b/netdev" "$a/netdev"
+fi
+
+# --- Load average and thread count -----------------------------------------
+if [[ -f $a/loadavg ]]; then
+  awk '{
+    split($4, r, "/")
+    printf "session_sys_load1=%s\n", $1
+    printf "session_sys_load5=%s\n", $2
+    printf "session_sys_load15=%s\n", $3
+    printf "session_sys_running=%s\n", r[1]
+    printf "session_sys_threads=%s\n", r[2]
+  }' "$a/loadavg"
+fi
+
+# --- CPU frequency, thermals and RAPL --------------------------------------
+if [[ -f $a/cpufreq ]]; then
+  awk '
+    {
+      n++; cur += $1
+      if (n == 1 || $1 > max) max = $1
+      if (n == 1 || $1 < min) min = $1
+      if ($2 > hwmax) hwmax = $2
+      if (n == 1 || $2 < hwmin) hwmin = $2
+      gov = $6
+    }
+    END {
+      if (!n) exit
+      printf "session_cpufreq_cur_avg_mhz=%.0f\n", cur / n / 1000
+      printf "session_cpufreq_cur_max_mhz=%.0f\n", max / 1000
+      printf "session_cpufreq_cur_min_mhz=%.0f\n", min / 1000
+      printf "session_cpufreq_hw_max_mhz=%.0f\n", hwmax / 1000
+      printf "session_cpufreq_hw_min_mhz=%.0f\n", hwmin / 1000
+      printf "session_cpufreq_governor=%s\n", gov
+    }' "$a/cpufreq"
+fi
+
+if [[ -f $a/thermal ]]; then
+  awk '
+    { if ($2 + 0 > max) max = $2 + 0 }
+    END { printf "session_thermal_max_c=%.1f\n", max / 1000 }' "$a/thermal"
+fi
+
+if [[ -f $b/rapl && -f $a/rapl ]]; then
+  awk -v e="$e" '
+    FNR == NR { old[$1] = $2; next }
+    {
+      d = $2 - old[$1]
+      if (d < 0) d = 0
+      sum += d
+    }
+    END {
+      printf "session_rapl_energy_j=%.2f\n", sum / 1000000
+      printf "session_rapl_power_w=%.2f\n", sum / 1000000 / e
+    }' "$b/rapl" "$a/rapl"
+fi

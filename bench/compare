@@ -70,11 +70,11 @@ for ((i = 0; i < ${#groups[@]}; i++)); do
 done
 echo
 
-printf '%-34s' "metric"
-for ((i = 0; i < ${#groups[@]}; i++)); do printf ' %-18s' "[$((i + 1))]"; done
+printf '%-44s' "metric"
+for ((i = 0; i < ${#groups[@]}; i++)); do printf ' %-20s' "[$((i + 1))]"; done
 printf '\n'
-printf '%-34s' "------"
-for ((i = 0; i < ${#groups[@]}; i++)); do printf ' %-18s' "------"; done
+printf '%-44s' "------"
+for ((i = 0; i < ${#groups[@]}; i++)); do printf ' %-20s' "------"; done
 echo
 
 for key in "${keys[@]}"; do
@@ -88,15 +88,15 @@ for key in "${keys[@]}"; do
     IFS=$'\t' read -r med lo hi < <(stat_of "$g" "$key")
     if [[ $med == "-" || $med == missing ]]; then
       medians+=("")
-      line+="$(printf ' %-18s' "-")"
+      line+="$(printf ' %-20s' "-")"
     else
       medians+=("$med")
       if [[ $lo == "-" || $lo == "$med" ]]; then cell="$med"; else cell="$med [$lo..$hi]"; fi
-      line+="$(printf ' %-18s' "$cell")"
+      line+="$(printf ' %-20s' "$cell")"
     fi
   done
   base="${medians[0]:-}"
-  printf '%-34s%s' "$key" "$line"
+  printf '%-44s%s' "$key" "$line"
   if [[ -n $base ]] && numeric "$base" && (( ${#medians[@]} > 1 )); then
     printf '   delta:'
     for ((i = 1; i < ${#medians[@]}; i++)); do
