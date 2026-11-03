@@ -497,16 +497,16 @@ if want session; then
       while read -r p; do
         [[ -r /proc/$p/stat ]] || continue
         procs=$((procs + 1))
-        read -r c mf mj < <(awk '{ print $14 + $15, $10, $12 }' "/proc/$p/stat" 2>/dev/null)
+        read -r c mf mj < <(awk '{ print $14 + $15, $10, $12 }' "/proc/$p/stat" 2>/dev/null) || { c=0; mf=0; mj=0; }
         r="$(awk '/^VmRSS:/{ print $2 }' "/proc/$p/status" 2>/dev/null || echo 0)"
         ps="$(awk '/^Pss:/{ s += $2 } END { print s + 0 }' "/proc/$p/smaps_rollup" 2>/dev/null || echo 0)"
-        read -r rb wb < <(awk '$1 == "read_bytes:" { r = $2 } $1 == "write_bytes:" { w = $2 } END { print r + 0, w + 0 }' "/proc/$p/io" 2>/dev/null)
+        read -r rb wb < <(awk '$1 == "read_bytes:" { r = $2 } $1 == "write_bytes:" { w = $2 } END { print r + 0, w + 0 }' "/proc/$p/io" 2>/dev/null) || { rb=0; wb=0; }
         vr="$(proc_vram_kb "$p")"
         cpu=$((cpu + ${c:-0})); minf=$((minf + ${mf:-0})); majf=$((majf + ${mj:-0}))
         rss=$((rss + ${r:-0})); pss=$((pss + ${ps:-0})); vram=$((vram + ${vr:-0}))
         readb=$((readb + ${rb:-0})); writeb=$((writeb + ${wb:-0}))
         for t in /proc/"$p"/task/*; do
-          read -r v n < <(awk '/^voluntary_ctxt_switches:/ { v = $2 } /^nonvoluntary_ctxt_switches:/ { n = $2 } END { print v + 0, n + 0 }' "$t/status" 2>/dev/null)
+          read -r v n < <(awk '/^voluntary_ctxt_switches:/ { v = $2 } /^nonvoluntary_ctxt_switches:/ { n = $2 } END { print v + 0, n + 0 }' "$t/status" 2>/dev/null) || { v=0; n=0; }
           read -r _ w q <"$t/schedstat" 2>/dev/null || { w=0; q=0; }
           vol=$((vol + ${v:-0})); nvol=$((nvol + ${n:-0}))
           wait=$((wait + ${w:-0})); slices=$((slices + ${q:-0}))
