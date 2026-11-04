@@ -119,6 +119,19 @@ measure() {
   elapsed=$(awk -v a="$t0" -v b="$t1" 'BEGIN{printf "%.2f", b-a}')
   for pkg in quickshell hyprland zen foot xwayland audio; do
     local b a
+    local pss rss anon huge threads procs
+    pss=$(grep -E "^pkg_${pkg}_pss_kb=" "$summary" | tail -1 | cut -d= -f2)
+    rss=$(grep -E "^pkg_${pkg}_rss_kb=" "$summary" | tail -1 | cut -d= -f2)
+    anon=$(grep -E "^pkg_${pkg}_pss_anon_kb=" "$summary" | tail -1 | cut -d= -f2)
+    huge=$(grep -E "^pkg_${pkg}_anon_huge_kb=" "$summary" | tail -1 | cut -d= -f2)
+    threads=$(grep -E "^pkg_${pkg}_threads=" "$summary" | tail -1 | cut -d= -f2)
+    procs=$(grep -E "^pkg_${pkg}_procs=" "$summary" | tail -1 | cut -d= -f2)
+    echo "pkg_${pkg}_${tag}_pss_kb=${pss:-missing}" >>"$summary"
+    echo "pkg_${pkg}_${tag}_rss_kb=${rss:-missing}" >>"$summary"
+    echo "pkg_${pkg}_${tag}_pss_anon_kb=${anon:-missing}" >>"$summary"
+    echo "pkg_${pkg}_${tag}_anon_huge_kb=${huge:-missing}" >>"$summary"
+    echo "pkg_${pkg}_${tag}_threads=${threads:-missing}" >>"$summary"
+    echo "pkg_${pkg}_${tag}_procs=${procs:-missing}" >>"$summary"
     b=$(grep -E "^pkg_${pkg}_cpu_jiffies=" "$before" | tail -1 | cut -d= -f2)
     a=$(grep -E "^pkg_${pkg}_cpu_jiffies=" "$summary" | tail -1 | cut -d= -f2)
     echo "pkg_${pkg}_${tag}_cpu_pct=$(awk -v x="${b:-0}" -v y="${a:-0}" -v hz="$(getconf CLK_TCK)" -v e="$elapsed" 'BEGIN{if(e<=0) print "missing"; else printf "%.2f", 100*((y-x)/hz)/e}')" >>"$summary"
@@ -158,10 +171,6 @@ work_zen() {
     zen-browser --new-tab about:blank >/dev/null 2>&1 &
   done
   sleep 5
-  if [[ $clean == 1 ]]; then
-    pkill -TERM -x zen-bin 2>/dev/null || true
-    sleep 1
-  fi
 }
 
 work_foot() {
@@ -172,7 +181,18 @@ work_foot() {
     done
   fi
   sleep 8
-  if [[ $clean == 1 ]]; then pkill -TERM -x footclient 2>/dev/null || true; fi
+}
+
+cleanup_zen() {
+  [[ $clean == 1 ]] || return 0
+  pkill -TERM -x zen-bin 2>/dev/null || true
+  sleep 1
+}
+
+cleanup_foot() {
+  [[ $clean == 1 ]] || return 0
+  pkill -TERM -x footclient 2>/dev/null || true
+  sleep 1
 }
 
 work_reclaim() {
@@ -189,15 +209,17 @@ case "$mode" in
   idle) ;;
   quickshell) measure quickshell work_quickshell ;;
   hyprland) measure hyprland work_hyprland ;;
-  zen) measure zen work_zen ;;
-  foot) measure foot work_foot ;;
+  zen) measure zen work_zen; cleanup_zen ;;
+  foot) measure foot work_foot; cleanup_foot ;;
   reclaim) measure reclaim work_reclaim ;;
   all)
     measure idle true
     measure quickshell work_quickshell
     measure hyprland work_hyprland
     measure zen work_zen
+    cleanup_zen
     measure foot work_foot
+    cleanup_foot
     ;;
   *) echo "unknown KESTREL_PACKAGES_MODE: $mode" >&2; exit 2 ;;
 esac
