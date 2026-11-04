@@ -1,0 +1,205 @@
+#!/bin/bash
+
+# Per-package resource harness for the Kestrel desktop. It snapshots the
+# selected packages (Quickshell, Hyprland, Zen, foot and their dependencies)
+# around representative workloads, and reports CPU, PSS/RSS, faults, context
+# switches and scheduler wait per package.
+
+set -euo pipefail
+
+label="${1:-packages}"
+mode="${KESTREL_PACKAGES_MODE:-all}"
+clean="${KESTREL_PACKAGES_CLEAN:-1}"
+stamp=$(date +%Y%m%d-%H%M%S)
+if [[ -d /mnt/kestrel-host-logs ]]; then
+  out="/mnt/kestrel-host-logs/packages-$stamp"
+else
+  out="${XDG_STATE_HOME:-$HOME/.local/state}/kestrel/packages/$stamp"
+fi
+mkdir -p "$out"
+summary="$out/summary.txt"
+: >"$summary"
+
+have() { command -v "$1" >/dev/null 2>&1; }
+say() { printf '\n== %s ==\n' "$*" | tee -a "$out/log.txt"; }
+
+{
+  echo "label=$label"
+  echo "mode=$mode"
+  echo "kernel=$(uname -r)"
+  echo "cpu=$(awk -F: '/model name/{sub(/^ /, "", $2); print $2; exit}' /proc/cpuinfo)"
+  echo "nproc=$(nproc)"
+  echo "governor=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo unknown)"
+  echo "variant=${KESTREL_VARIANT:-unlabelled}"
+  for p in quickshell-kestrel hyprland-kestrel zen-browser foot-kestrel scx-kestrel kestrel-broker libkestrel-hint; do
+    v=$(pacman -Q "$p" 2>/dev/null | awk '{print $2}') || true
+    [[ -n ${v:-} ]] && echo "pkg_${p}=$v"
+  done
+} | tee "$summary" | sed 's/^/  /'
+
+package_pids() {
+  case "$1" in
+    quickshell) pgrep -x quickshell 2>/dev/null || true ;;
+    hyprland) pgrep -x Hyprland 2>/dev/null || true ;;
+    zen) pgrep -f 'zen-bin|Web Content|Isolated Web Co|WebExtensions|RDD Process|Socket Process|forkserver' 2>/dev/null || true ;;
+    foot) { pgrep -x foot; pgrep -x footclient; } 2>/dev/null || true ;;
+    xwayland) pgrep -x Xwayland 2>/dev/null || true ;;
+    audio) { pgrep -x pipewire; pgrep -x wireplumber; pgrep -x pipewire-pulse; } 2>/dev/null || true ;;
+    *) return 0 ;;
+  esac
+}
+
+snapshot() {
+  local pkg="$1" p t
+  local procs=0 threads=0 rss=0 pss=0 panon=0 pfile=0 pshmem=0 phuge=0
+  local cpu=0 minf=0 majf=0 vctx=0 nvol=0 rb=0 wb=0 wait=0 slices=0
+  local v r ps pa pf psh ph c mf mj rdb wrb w q n
+  while read -r p; do
+    [[ -r /proc/$p/stat ]] || continue
+    procs=$((procs + 1))
+    read -r c mf mj < <(awk '{print $14+$15, $10, $12}' "/proc/$p/stat" 2>/dev/null) || { c=0; mf=0; mj=0; }
+    r="$(awk '/^VmRSS:/{print $2}' "/proc/$p/status" 2>/dev/null || echo 0)"
+    read -r ps pa pf psh ph < <(awk '
+      /^Pss:/{p=$2} /^Pss_Anon:/{a=$2} /^Pss_File:/{f=$2}
+      /^Pss_Shmem:/{s=$2} /^AnonHugePages:/{h=$2}
+      END{print p+0,a+0,f+0,s+0,h+0}' "/proc/$p/smaps_rollup" 2>/dev/null) || { ps=0; pa=0; pf=0; psh=0; ph=0; }
+    read -r rdb wrb < <(awk '$1=="read_bytes:"{r=$2} $1=="write_bytes:"{w=$2} END{print r+0,w+0}' "/proc/$p/io" 2>/dev/null) || { rdb=0; wrb=0; }
+    cpu=$((cpu+c)); minf=$((minf+mf)); majf=$((majf+mj))
+    rss=$((rss+r)); pss=$((pss+ps)); panon=$((panon+pa)); pfile=$((pfile+pf)); pshmem=$((pshmem+psh)); phuge=$((phuge+ph))
+    rb=$((rb+rdb)); wb=$((wb+wrb))
+    for t in /proc/"$p"/task/*; do
+      threads=$((threads + 1))
+      read -r v n < <(awk '/^voluntary_ctxt_switches:/{v=$2} /^nonvoluntary_ctxt_switches:/{n=$2} END{print v+0,n+0}' "$t/status" 2>/dev/null) || { v=0; n=0; }
+      read -r _ w q < "$t/schedstat" 2>/dev/null || { w=0; q=0; }
+      vctx=$((vctx+v)); nvol=$((nvol+n)); wait=$((wait+w)); slices=$((slices+q))
+    done
+  done < <(package_pids "$pkg")
+  printf '%s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s\n' \
+    "$procs" "$threads" "$rss" "$pss" "$panon" "$pfile" "$pshmem" "$phuge" \
+    "$cpu" "$minf" "$majf" "$vctx" "$nvol" "$rb" "$wb" "$wait"
+}
+
+snapshot_all() {
+  local pkg
+  for pkg in quickshell hyprland zen foot xwayland audio; do
+    read -r procs threads rss pss panon pfile pshmem phuge cpu minf majf vctx nvol rb wb wait \
+      < <(snapshot "$pkg" | head -1)
+    {
+      echo "pkg_${pkg}_procs=$procs"
+      echo "pkg_${pkg}_threads=$threads"
+      echo "pkg_${pkg}_rss_kb=$rss"
+      echo "pkg_${pkg}_pss_kb=$pss"
+      echo "pkg_${pkg}_pss_anon_kb=$panon"
+      echo "pkg_${pkg}_pss_file_kb=$pfile"
+      echo "pkg_${pkg}_pss_shmem_kb=$pshmem"
+      echo "pkg_${pkg}_anon_huge_kb=$phuge"
+      echo "pkg_${pkg}_cpu_jiffies=$cpu"
+      echo "pkg_${pkg}_minflt=$minf"
+      echo "pkg_${pkg}_majflt=$majf"
+      echo "pkg_${pkg}_voluntary=$vctx"
+      echo "pkg_${pkg}_involuntary=$nvol"
+      echo "pkg_${pkg}_read_kb=$((rb / 1024))"
+      echo "pkg_${pkg}_write_kb=$((wb / 1024))"
+      echo "pkg_${pkg}_sched_wait_ns=$wait"
+    } >>"$summary"
+  done
+}
+
+# Snapshot around a workload and emit deltas and current PSS.
+measure() {
+  local tag="$1" pkg t0 t1 elapsed
+  shift
+  snapshot_all
+  local before="$out/$tag-before.txt"
+  cp "$summary" "$before"
+  t0=$(date +%s.%N)
+  "$@"
+  t1=$(date +%s.%N)
+  snapshot_all
+  elapsed=$(awk -v a="$t0" -v b="$t1" 'BEGIN{printf "%.2f", b-a}')
+  for pkg in quickshell hyprland zen foot xwayland audio; do
+    local b a
+    b=$(grep -E "^pkg_${pkg}_cpu_jiffies=" "$before" | tail -1 | cut -d= -f2)
+    a=$(grep -E "^pkg_${pkg}_cpu_jiffies=" "$summary" | tail -1 | cut -d= -f2)
+    echo "pkg_${pkg}_${tag}_cpu_pct=$(awk -v x="${b:-0}" -v y="${a:-0}" -v hz="$(getconf CLK_TCK)" -v e="$elapsed" 'BEGIN{if(e<=0) print "missing"; else printf "%.2f", 100*((y-x)/hz)/e}')" >>"$summary"
+    b=$(grep -E "^pkg_${pkg}_voluntary=" "$before" | tail -1 | cut -d= -f2)
+    a=$(grep -E "^pkg_${pkg}_voluntary=" "$summary" | tail -1 | cut -d= -f2)
+    echo "pkg_${pkg}_${tag}_wakeups_per_s=$(awk -v x="${b:-0}" -v y="${a:-0}" -v e="$elapsed" 'BEGIN{if(e<=0) print "missing"; else printf "%.2f", (y-x)/e}')" >>"$summary"
+  done
+  echo "workload_${tag}_seconds=$elapsed" >>"$summary"
+}
+
+work_quickshell() {
+  have hyprctl || return 0
+  if have kestrel-shell && kestrel-shell shell ping >/dev/null 2>&1; then
+    kestrel-shell shell toggle kestrel.menu '{"menu":"root"}' >/dev/null 2>&1 || true
+  fi
+  sleep 2
+  if have kestrel-shell; then
+    kestrel-shell shell toggle kestrel.menu '{"menu":"root"}' >/dev/null 2>&1 || true
+  fi
+  sleep 2
+}
+
+work_hyprland() {
+  local i
+  for i in $(seq 1 15); do
+    hyprctl dispatch workspace e+1 >/dev/null 2>&1 || true
+    sleep 0.25
+    hyprctl dispatch workspace e-1 >/dev/null 2>&1 || true
+    sleep 0.25
+  done
+}
+
+work_zen() {
+  local i
+  have zen-browser || return 0
+  for i in 1 2 3 4; do
+    zen-browser --new-tab about:blank >/dev/null 2>&1 &
+  done
+  sleep 5
+  if [[ $clean == 1 ]]; then
+    pkill -TERM -x zen-bin 2>/dev/null || true
+    sleep 1
+  fi
+}
+
+work_foot() {
+  local i
+  if have footclient; then
+    for i in 1 2; do
+      footclient -e sh -c 'sleep 8' >/dev/null 2>&1 &
+    done
+  fi
+  sleep 8
+  if [[ $clean == 1 ]]; then pkill -TERM -x footclient 2>/dev/null || true; fi
+}
+
+work_reclaim() {
+  local bg
+  bg=/sys/fs/cgroup/user.slice/user-$(id -u).slice/user@$(id -u).service/kestrel.slice/kestrel-browser.slice/background
+  [[ -d $bg ]] || return 0
+  for _ in 1 2 3; do
+    printf '256M' > "$bg/memory.reclaim" 2>/dev/null || true
+    sleep 1
+  done
+}
+
+case "$mode" in
+  idle) ;;
+  quickshell) measure quickshell work_quickshell ;;
+  hyprland) measure hyprland work_hyprland ;;
+  zen) measure zen work_zen ;;
+  foot) measure foot work_foot ;;
+  reclaim) measure reclaim work_reclaim ;;
+  all)
+    measure idle true
+    measure quickshell work_quickshell
+    measure hyprland work_hyprland
+    measure zen work_zen
+    measure foot work_foot
+    ;;
+  *) echo "unknown KESTREL_PACKAGES_MODE: $mode" >&2; exit 2 ;;
+esac
+
+echo "wrote $out"
