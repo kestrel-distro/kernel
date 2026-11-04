@@ -196,7 +196,15 @@ cleanup_foot() {
 }
 
 work_reclaim() {
-  local bg
+  local bg i
+  # Background pages only exist once a browser is loaded; open a few tabs so
+  # the reclaim delta reflects an actual browser workload.
+  if have zen-browser; then
+    for i in 1 2 3 4; do
+      zen-browser --new-tab about:blank >/dev/null 2>&1 &
+    done
+    sleep 5
+  fi
   bg=/sys/fs/cgroup/user.slice/user-$(id -u).slice/user@$(id -u).service/kestrel.slice/kestrel-browser.slice/background
   [[ -d $bg ]] || return 0
   for _ in 1 2 3; do
