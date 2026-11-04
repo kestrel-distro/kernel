@@ -216,7 +216,11 @@ work_reclaim() {
     uid=$(stat -c %u "/proc/$hp" 2>/dev/null || id -u)
   fi
   bg=/sys/fs/cgroup/user.slice/user-$uid.slice/user@$uid.service/kestrel.slice/kestrel-browser.slice/background
-  [[ -d $bg ]] || return 0
+  if [[ ! -d $bg ]]; then
+    bg=$(find /sys/fs/cgroup/user.slice -path '*/kestrel-browser.slice/background' -type d 2>/dev/null | head -1)
+  fi
+  echo "reclaim_background=${bg:-missing}" >>"$summary"
+  [[ -n ${bg:-} && -d $bg ]] || return 0
   for _ in 1 2 3; do
     printf '256M' > "$bg/memory.reclaim" 2>/dev/null || true
     sleep 1
