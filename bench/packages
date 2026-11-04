@@ -196,22 +196,16 @@ cleanup_foot() {
 }
 
 work_reclaim() {
-  local bg i
-  # Background pages only exist once a browser is loaded; open a few tabs so
-  # the reclaim delta reflects an actual browser workload.
-  if have zen-browser; then
-    for i in 1 2 3 4; do
-      zen-browser --new-tab about:blank >/dev/null 2>&1 &
-    done
-    sleep 5
+  local bg i uid hp
+  # Measure reclaim on a browser that has been backgrounded: switch to an empty
+  # workspace so the broker demotes the Zen tree, then reclaim its bucket.
+  if have hyprctl; then
+    hyprctl dispatch workspace e+1 >/dev/null 2>&1 || true
+    sleep 1
   fi
-  # This harness normally runs as root; the session cgroups belong to the
-  # compositor's user, so resolve that uid instead of using id -u.
-  local uid
   if [[ -n ${KESTREL_SESSION_UID:-} ]]; then
     uid=$KESTREL_SESSION_UID
   else
-    local hp
     hp=$(pgrep -x Hyprland | head -1)
     uid=$(stat -c %u "/proc/$hp" 2>/dev/null || id -u)
   fi
@@ -232,13 +226,14 @@ case "$mode" in
   quickshell) measure quickshell work_quickshell ;;
   hyprland) measure hyprland work_hyprland ;;
   zen) measure zen work_zen; cleanup_zen ;;
+  reclaim) measure zen work_zen; measure reclaim work_reclaim; cleanup_zen ;;
   foot) measure foot work_foot; cleanup_foot ;;
-  reclaim) measure reclaim work_reclaim ;;
   all)
     measure idle true
     measure quickshell work_quickshell
     measure hyprland work_hyprland
     measure zen work_zen
+    measure reclaim work_reclaim
     cleanup_zen
     measure foot work_foot
     cleanup_foot
