@@ -57,6 +57,7 @@ else
     bridge:scx_kestrel::on:on
     hints:scx_kestrel::on:off
     lavd:scx_lavd::off:off
+    evdf:evdf::off:off
   )
 fi
 
@@ -106,6 +107,16 @@ set_cgroups() {
 
 set_scheduler() {
   local sched="$1" m="$2" args
+  if [[ $sched == none || $sched == evdf ]]; then
+    as_root systemctl stop scx_loader.service 2>/dev/null || true
+    for _ in $(seq 1 20); do
+      [[ "$(cat /sys/kernel/sched_ext/state 2>/dev/null)" == "disabled" ]] && break
+      sleep 0.25
+    done
+    sleep "${KESTREL_SCX_SETTLE:-5}"
+    return 0
+  fi
+  as_root systemctl start scx_loader.service 2>/dev/null || true
   args=(switch --sched "$sched")
   [[ -n $m ]] && args+=(--mode "$m")
   as_root scxctl "${args[@]}" || true
@@ -152,6 +163,7 @@ apply() {
 
 restore() {
   install_layers "" >/dev/null 2>&1 || true
+  as_root systemctl start scx_loader.service >/dev/null 2>&1 || true
   as_root scxctl restore >/dev/null 2>&1 || true
   systemctl --user start kestrel-slices.service kestrel-broker.service >/dev/null 2>&1 || true
   set_hints 1
