@@ -28,12 +28,18 @@ rotated** so a warm-up drift cannot look like a variant effect.
 | `sched` | `scx_kestrel` | off | off | scheduler alone |
 | `bridge` | `scx_kestrel` | on | on | the full bridge |
 | `hints` | `scx_kestrel` | off | on | hint value vs scheduler |
+| `lavd` | `scx_lavd` | off | off | alternative scheduler |
 
-Variant syntax is `name:scheduler:mode:hints:cgroups`; override the set with
+Variant syntax is `name:scheduler:mode:hints:cgroups[:layers-json]`; the
+optional sixth field installs an alternate `scx_kestrel` layer file before the
+switch, for interleaved layer A/B tests. Override the set with
 `KESTREL_MATRIX_VARIANTS="..."`. `KESTREL_MATRIX_MODE` (default `session`),
 `KESTREL_MATRIX_SESSION_SECONDS` (default 30) and `KESTREL_MATRIX_BG_CPUS`
 (default 0) pass through to `bench/run`; the background CPU hog is what makes
-the interactive classes actually queue.
+the interactive classes actually queue. `KESTREL_MATRIX_CLEAN` (default 1)
+kills the scripted browser/foot workload between cells so one cell cannot
+inherit tabs from the previous one; set it to 0 only when the guest has no
+other browser or terminal workload you care about.
 
 Each result carries `packages=` and `kernel=` context (`kestrel` or `stock`,
 auto-detected; override with `KESTREL_MATRIX_LABEL`). Comparing across images is
@@ -112,10 +118,11 @@ raw before/after files; `bench/sysstats` turns them into `session_sys_*`,
 
 `KESTREL_SESSION_TERMS` (foot surfaces), `KESTREL_SESSION_TABS` (Zen tabs),
 `KESTREL_SESSION_BG_CPUS` (stress-ng CPU hogs for contention; `session_bg_bogo_ops`
-records their throughput) and `KESTREL_SESSION_NO_APPS=1` (measure churn only,
+records their throughput), `KESTREL_SESSION_CLEAN=1` (kill spawned Zen/footclient
+processes after the cell) and `KESTREL_SESSION_NO_APPS=1` (measure churn only,
 spawn nothing) tune the workload. It needs a live Hyprland session; without one
-it records `session=skipped`. The spawned busy loops self-terminate; spawned
-browser tabs are left open and are not cleaned up.
+it records `session=skipped`. The matrix enables cleanup by default; standalone
+runs leave the user's apps alone.
 
 ## Scope
 
