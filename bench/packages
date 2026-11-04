@@ -205,7 +205,17 @@ work_reclaim() {
     done
     sleep 5
   fi
-  bg=/sys/fs/cgroup/user.slice/user-$(id -u).slice/user@$(id -u).service/kestrel.slice/kestrel-browser.slice/background
+  # This harness normally runs as root; the session cgroups belong to the
+  # compositor's user, so resolve that uid instead of using id -u.
+  local uid
+  if [[ -n ${KESTREL_SESSION_UID:-} ]]; then
+    uid=$KESTREL_SESSION_UID
+  else
+    local hp
+    hp=$(pgrep -x Hyprland | head -1)
+    uid=$(stat -c %u "/proc/$hp" 2>/dev/null || id -u)
+  fi
+  bg=/sys/fs/cgroup/user.slice/user-$uid.slice/user@$uid.service/kestrel.slice/kestrel-browser.slice/background
   [[ -d $bg ]] || return 0
   for _ in 1 2 3; do
     printf '256M' > "$bg/memory.reclaim" 2>/dev/null || true
