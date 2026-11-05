@@ -165,7 +165,7 @@ dump_smaps() {
       }
       /^Rss:/ { rss += $2 }
       END { if (start != "") printf "%d\t%s\n", rss, start }
-    ' "/proc/$p/smaps" 2>/dev/null | sort -rn | head -20
+    ' "/proc/$p/smaps" 2>/dev/null | sort -rn | head -20 || true
   } >"$outfile"
 }
 
