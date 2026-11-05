@@ -139,6 +139,13 @@ thread_deltas() {
     line=$(awk -F'\t' -v p="$pkg" '$1==p' "$out/thread-delta-$tag.tsv" 2>/dev/null \
       | sort -t$'\t' -k5,5nr | head -5 \
       | awk -F'\t' '{printf "%s:tid=%s:pid=%s=%s ", $4, $3, $2, $5}' || true)
+    if [[ -z ${line:-} ]]; then
+      # A process launched by the workload has no pre-workload baseline;
+      # report its absolute CPU time after the workload instead.
+      line=$(awk -F'\t' -v p="$pkg" '$1==p' "$after" 2>/dev/null \
+        | sort -t$'\t' -k5,5nr | head -5 \
+        | awk -F'\t' '{printf "%s:tid=%s:pid=%s=%s ", $4, $3, $2, $5}' || true)
+    fi
     echo "pkg_${pkg}_${tag}_hot_threads=${line:-none}" >>"$summary"
   done
   return 0
@@ -250,6 +257,13 @@ work_zen() {
   sleep 5
 }
 
+work_audio() {
+  if have speaker-test; then
+    timeout 3 speaker-test -t sine -l 1 -c 2 >/dev/null 2>&1 || true
+  fi
+  sleep 1
+}
+
 work_foot() {
   local i
   if have footclient; then
@@ -343,6 +357,7 @@ case "$mode" in
     cleanup_zen
     measure foot work_foot
     cleanup_foot
+    measure audio work_audio
     ;;
   *) echo "unknown KESTREL_PACKAGES_MODE: $mode" >&2; exit 2 ;;
 esac
