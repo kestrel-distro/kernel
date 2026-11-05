@@ -19,6 +19,7 @@ fi
 mkdir -p "$out"
 summary="$out/summary.txt"
 : >"$summary"
+PKGS="quickshell hyprland zen foot xwayland audio portal broker scheduler"
 
 have() { command -v "$1" >/dev/null 2>&1; }
 say() { printf '\n== %s ==\n' "$*" | tee -a "$out/log.txt"; }
@@ -45,6 +46,9 @@ package_pids() {
     foot) { pgrep -x foot; pgrep -x footclient; } 2>/dev/null || true ;;
     xwayland) pgrep -x Xwayland 2>/dev/null || true ;;
     audio) { pgrep -x pipewire; pgrep -x wireplumber; pgrep -x pipewire-pulse; } 2>/dev/null || true ;;
+    portal) pgrep -f 'xdg-desktop-portal' 2>/dev/null || true ;;
+    broker) pgrep -x kestrel-broker 2>/dev/null || true ;;
+    scheduler) pgrep -x scx_loader 2>/dev/null || true ;;
     *) return 0 ;;
   esac
 }
@@ -81,7 +85,7 @@ snapshot() {
 
 snapshot_all() {
   local pkg
-  for pkg in quickshell hyprland zen foot xwayland audio; do
+  for pkg in $PKGS; do
     read -r procs threads rss pss panon pfile pshmem phuge cpu minf majf vctx nvol rb wb wait \
       < <(snapshot "$pkg" | head -1)
     {
@@ -105,19 +109,56 @@ snapshot_all() {
   done
 }
 
+# Per-thread CPU snapshot. The aggregate per-package numbers say which package
+# is hot; this says which thread inside it is hot for each workload.
+thread_snapshot() {
+  local tag="$1" pkg p t comm cpu
+  : >"$out/thread-$tag.tsv"
+  for pkg in $PKGS; do
+    while read -r p; do
+      [[ -d /proc/$p/task ]] || continue
+      for t in /proc/$p/task/*; do
+        [[ -r $t/stat ]] || continue
+        comm=$(cat "$t/comm" 2>/dev/null || true)
+        cpu=$(awk '{sub(/.*\) /,""); print $12+$13}' "$t/stat" 2>/dev/null || echo 0)
+        printf '%s\t%s\t%s\t%s\t%s\n' "$pkg" "$p" "${t##*/}" "$comm" "$cpu"
+      done
+    done < <(package_pids "$pkg")
+  done
+}
+
+thread_deltas() {
+  local tag="$1" pkg line
+  local before="$out/thread-$tag-before.tsv" after="$out/thread-$tag-after.tsv"
+  [[ -s $before && -s $after ]] || return 0
+  awk -F'\t' 'NR==FNR { b[$1 FS $2 FS $3]=$5; next }
+    { k=$1 FS $2 FS $3; if (k in b) { d=$5-b[k]; if (d>0) print $1"\t"$2"\t"$3"\t"$4"\t"d } }
+  ' "$before" "$after" >"$out/thread-delta-$tag.tsv" || true
+  for pkg in $PKGS; do
+    line=$(awk -F'\t' -v p="$pkg" '$1==p' "$out/thread-delta-$tag.tsv" 2>/dev/null \
+      | sort -t$'\t' -k5,5nr | head -5 \
+      | awk -F'\t' '{printf "%s:tid=%s:pid=%s=%s ", $4, $3, $2, $5}' || true)
+    echo "pkg_${pkg}_${tag}_hot_threads=${line:-none}" >>"$summary"
+  done
+  return 0
+}
+
 # Snapshot around a workload and emit deltas and current PSS.
 measure() {
   local tag="$1" pkg t0 t1 elapsed
   shift
   snapshot_all
+  thread_snapshot "$tag-before"
   local before="$out/$tag-before.txt"
   cp "$summary" "$before"
   t0=$(date +%s.%N)
   "$@"
   t1=$(date +%s.%N)
   snapshot_all
+  thread_snapshot "$tag-after"
+  thread_deltas "$tag"
   elapsed=$(awk -v a="$t0" -v b="$t1" 'BEGIN{printf "%.2f", b-a}')
-  for pkg in quickshell hyprland zen foot xwayland audio; do
+  for pkg in $PKGS; do
     local b a
     local pss rss anon huge threads procs
     pss=$(grep -E "^pkg_${pkg}_pss_kb=" "$summary" | tail -1 | cut -d= -f2)
