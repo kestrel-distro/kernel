@@ -272,6 +272,14 @@ cleanup_foot() {
   sleep 1
 }
 
+work_reclaim_auto() {
+  # No manual memory.reclaim here: this measures the broker's demotion hook.
+  if have hyprctl; then
+    hyprctl dispatch workspace e+1 >/dev/null 2>&1 || true
+  fi
+  sleep 3
+}
+
 work_reclaim() {
   local bg i uid hp
   # Measure reclaim on a browser that has been backgrounded: switch to an empty
@@ -324,6 +332,7 @@ case "$mode" in
   hyprland) measure hyprland work_hyprland ;;
   zen) measure zen work_zen; cleanup_zen ;;
   reclaim) measure zen work_zen; measure reclaim work_reclaim; cleanup_zen ;;
+  reclaim-auto) measure zen work_zen; measure reclaim-auto work_reclaim_auto; cleanup_zen ;;
   foot) measure foot work_foot; cleanup_foot ;;
   all)
     measure idle true
