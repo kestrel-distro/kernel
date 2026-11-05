@@ -259,18 +259,24 @@ work_reclaim() {
 case "$mode" in
   idle) ;;
   smaps)
-    dump_smaps idle
+    # Render a second pass at a smaller output so overlay/surface allocations
+    # can be separated from fixed renderer/JIT allocations.
+    if have hyprctl; then
+      mon=$(hyprctl -j monitors 2>/dev/null | jq -r '.[0].name // empty' 2>/dev/null || true)
+      if [[ -n ${mon:-} ]]; then
+        hyprctl keyword monitor "$mon,640x480@60,0x0,1" >/dev/null 2>&1 || true
+        sleep 3
+      fi
+    fi
+    dump_smaps idle-small
     toggle_menu
     sleep 2
-    dump_smaps menu-open
+    dump_smaps menu-open-small
     toggle_menu
     sleep 2
-    dump_smaps menu-closed
-    trim_malloc
-    sleep 2
-    dump_smaps after-trim
+    dump_smaps menu-closed-small
     sleep 6
-    dump_smaps settled
+    dump_smaps settled-small
     ;;
   quickshell) measure quickshell work_quickshell ;;
   hyprland) measure hyprland work_hyprland ;;
