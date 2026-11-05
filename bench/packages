@@ -257,6 +257,21 @@ work_zen() {
   sleep 5
 }
 
+work_xwayland() {
+  if have xprop; then
+    DISPLAY=${DISPLAY:-:0} xprop -root >/dev/null 2>&1 || true
+  fi
+  sleep 1
+}
+
+work_portal() {
+  if have gdbus; then
+    gdbus introspect --session --dest org.freedesktop.portal.Desktop \
+      --object-path /org/freedesktop/portal/desktop >/dev/null 2>&1 || true
+  fi
+  sleep 1
+}
+
 work_audio() {
   if have speaker-test; then
     timeout 3 speaker-test -t sine -l 1 -c 2 >/dev/null 2>&1 || true
@@ -358,6 +373,8 @@ case "$mode" in
     measure foot work_foot
     cleanup_foot
     measure audio work_audio
+    measure xwayland work_xwayland
+    measure portal work_portal
     ;;
   *) echo "unknown KESTREL_PACKAGES_MODE: $mode" >&2; exit 2 ;;
 esac
