@@ -149,6 +149,25 @@ toggle_menu() {
 
 # Snapshot the shell's virtual-memory layout so menu memory can be attributed
 # to heap, JIT, image/texture or shared mappings instead of guessed at.
+restart_shell() {
+  local backend="${1:-}" uid=1000 i
+  pkill -f 'kestrel-launch-shell' 2>/dev/null || true
+  pkill -x quickshell 2>/dev/null || true
+  sleep 1
+  runuser -u kestrel -- env \
+    HOME=/home/kestrel KESTREL_PATH=/usr/share/kestrel \
+    XDG_RUNTIME_DIR=/run/user/$uid \
+    WAYLAND_DISPLAY=wayland-1 \
+    DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$uid/bus \
+    ${backend:+QT_QUICK_BACKEND=$backend} \
+    kestrel-launch-shell >/dev/null 2>&1 &
+  for i in $(seq 1 20); do
+    pgrep -x quickshell >/dev/null 2>&1 && break
+    sleep 0.5
+  done
+  sleep 3
+}
+
 trim_malloc() {
   local p
   p=$(pgrep -x quickshell | head -1)
@@ -258,6 +277,25 @@ work_reclaim() {
 
 case "$mode" in
   idle) ;;
+  smaps-backends)
+    dump_smaps current
+    restart_shell software
+    dump_smaps software-idle
+    toggle_menu
+    sleep 2
+    dump_smaps software-menu-open
+    toggle_menu
+    sleep 2
+    dump_smaps software-menu-closed
+    restart_shell ""
+    dump_smaps default-idle
+    toggle_menu
+    sleep 2
+    dump_smaps default-menu-open
+    toggle_menu
+    sleep 2
+    dump_smaps default-menu-closed
+    ;;
   smaps)
     # Render a second pass at a smaller output so overlay/surface allocations
     # can be separated from fixed renderer/JIT allocations.
