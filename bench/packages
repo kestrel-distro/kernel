@@ -149,6 +149,14 @@ toggle_menu() {
 
 # Snapshot the shell's virtual-memory layout so menu memory can be attributed
 # to heap, JIT, image/texture or shared mappings instead of guessed at.
+trim_malloc() {
+  local p
+  p=$(pgrep -x quickshell | head -1)
+  [[ -n ${p:-} ]] || return 0
+  echo "== gdb malloc_trim ($p) ==" >>"$out/quickshell-smaps-after-trim.txt"
+  timeout 20 gdb -q -p "$p" -batch -ex 'call (int)malloc_trim(0)' >>"$out/quickshell-smaps-after-trim.txt" 2>&1 || true
+}
+
 dump_smaps() {
   local tag="$1" p outfile
   p=$(pgrep -x quickshell | head -1)
@@ -258,7 +266,10 @@ case "$mode" in
     toggle_menu
     sleep 2
     dump_smaps menu-closed
-    sleep 8
+    trim_malloc
+    sleep 2
+    dump_smaps after-trim
+    sleep 6
     dump_smaps settled
     ;;
   quickshell) measure quickshell work_quickshell ;;
