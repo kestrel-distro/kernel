@@ -142,6 +142,33 @@ measure() {
   echo "workload_${tag}_seconds=$elapsed" >>"$summary"
 }
 
+toggle_menu() {
+  have kestrel-shell || return 0
+  kestrel-shell shell toggle kestrel.menu '{"menu":"root"}' >/dev/null 2>&1 || true
+}
+
+# Snapshot the shell's virtual-memory layout so menu memory can be attributed
+# to heap, JIT, image/texture or shared mappings instead of guessed at.
+dump_smaps() {
+  local tag="$1" p outfile
+  p=$(pgrep -x quickshell | head -1)
+  [[ -n ${p:-} ]] || return 0
+  outfile="$out/quickshell-smaps-$tag.txt"
+  {
+    echo "== smaps_rollup ($tag) =="
+    cat "/proc/$p/smaps_rollup" 2>/dev/null || true
+    echo "== top mappings by Rss ($tag) =="
+    awk '
+      /^[0-9a-f]+-[0-9a-f]+ / {
+        if (start != "") printf "%d\t%s\n", rss, start
+        start = $0; rss = 0; next
+      }
+      /^Rss:/ { rss += $2 }
+      END { if (start != "") printf "%d\t%s\n", rss, start }
+    ' "/proc/$p/smaps" 2>/dev/null | sort -rn | head -20
+  } >"$outfile"
+}
+
 work_quickshell() {
   have hyprctl || return 0
   if have kestrel-shell && kestrel-shell shell ping >/dev/null 2>&1; then
@@ -223,6 +250,17 @@ work_reclaim() {
 
 case "$mode" in
   idle) ;;
+  smaps)
+    dump_smaps idle
+    toggle_menu
+    sleep 2
+    dump_smaps menu-open
+    toggle_menu
+    sleep 2
+    dump_smaps menu-closed
+    sleep 8
+    dump_smaps settled
+    ;;
   quickshell) measure quickshell work_quickshell ;;
   hyprland) measure hyprland work_hyprland ;;
   zen) measure zen work_zen; cleanup_zen ;;
