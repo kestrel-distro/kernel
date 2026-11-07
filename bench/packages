@@ -279,6 +279,18 @@ work_audio() {
   sleep 1
 }
 
+work_foot_output() {
+  local w="${KESTREL_FOOT_WORKERS:-0}"
+  foot -o "workers=$w" -e sh -c 'seq 1 100000; sleep 8' >/dev/null 2>&1 &
+  sleep 4
+}
+
+cleanup_foot_output() {
+  pkill -TERM -x foot 2>/dev/null || true
+  pkill -TERM -x footclient 2>/dev/null || true
+  sleep 1
+}
+
 work_foot() {
   local i
   if have footclient; then
@@ -363,6 +375,13 @@ case "$mode" in
   reclaim) measure zen work_zen; measure reclaim work_reclaim; cleanup_zen ;;
   reclaim-auto) measure zen work_zen; measure reclaim-auto work_reclaim_auto; cleanup_zen ;;
   foot) measure foot work_foot; cleanup_foot ;;
+  foot-cpu)
+    for w in 1 2 4; do
+      export KESTREL_FOOT_WORKERS=$w
+      measure "foot-w$w" work_foot_output
+      cleanup_foot_output
+    done
+    ;;
   all)
     measure idle true
     measure quickshell work_quickshell
